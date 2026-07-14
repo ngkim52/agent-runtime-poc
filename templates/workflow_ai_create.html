@@ -1,0 +1,609 @@
+{% extends "base.html" %}
+{% block title %}AI Workflow Designer{% endblock %}
+{% block content %}
+<style>
+.toast { position:fixed; top:1rem; right:1rem; z-index:9999; padding:0.75rem 1.5rem; border-radius:0.5rem; color:#fff; font-size:0.875rem; transition:opacity 0.3s; }
+.toast-success { background:#059669; }
+.toast-error { background:#dc2626; }
+.section-card { background:#fff; border-radius:0.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1); padding:1rem; margin-bottom:1rem; }
+.chat-msg { max-width:85%; padding:0.625rem 1rem; border-radius:1rem; line-height:1.5; font-size:0.875rem; white-space:pre-wrap; }
+.chat-user { background:#2563eb; color:#fff; border-bottom-right-radius:0.25rem; align-self:flex-end; }
+.chat-assistant { background:#f3f4f6; color:#1f2937; border-bottom-left-radius:0.25rem; align-self:flex-start; }
+.chat-system { background:#fef3c7; color:#92400e; border-radius:0.5rem; align-self:center; font-size:0.75rem; }
+</style>
+
+<div class="mb-4 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <a href="/workflows" class="text-blue-600 hover:underline text-sm">&larr; Workflows</a>
+    {% if wf_id and wf_ver %}
+    <a href="/workflows/{{ wf_id }}/{{ wf_ver }}" class="text-blue-600 hover:underline text-sm">&larr; View</a>
+    <a href="/workflows/{{ wf_id }}/{{ wf_ver }}/edit" class="text-blue-600 hover:underline text-sm">(Editor)</a>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Header -->
+<div class="section-card mb-4">
+  <div class="flex items-center gap-3 mb-2">
+    <h1 class="text-xl font-bold text-gray-800">AI Workflow Designer</h1>
+    {% if wf_id and wf_ver %}
+    <span class="text-gray-400 text-sm bg-gray-100 px-2 py-0.5 rounded">Editing: {{ wf_id }} v{{ wf_ver }}</span>
+    {% endif %}
+  </div>
+  <div class="flex items-center gap-3 text-xs text-gray-500">
+    <span>Describe what workflow you want to create or modify in natural language.</span>
+  </div>
+</div>
+
+<!-- Main split layout -->
+<div class="grid grid-cols-[1fr_1fr] gap-4" style="height:70vh;">
+  <!-- LEFT: Chat -->
+  <div class="section-card flex flex-col" style="height:60vh;">
+    <div class="flex items-center justify-between mb-3 pb-2 border-b">
+      <h2 class="text-base font-bold text-gray-800">&#128172; Chat</h2>
+      <button onclick="clearChat()" class="text-xs text-gray-400 hover:text-red-500">Clear</button>
+    </div>
+
+    <!-- Messages -->
+    <div id="chatMessages" class="flex flex-col gap-3 overflow-y-auto mb-3 px-1" style="height:55vh;">
+      <div class="chat-msg chat-system">
+        Hi! I can help you create and modify workflow definitions. Describe what you want, or ask me to load an existing workflow.
+      </div>
+    </div>
+
+    <!-- Input area -->
+    <div class="border-t pt-3 mt-auto">
+      <div class="flex gap-2">
+        <textarea id="chatInput" rows="2"
+          class="flex-1 border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-300"
+          placeholder="Describe the workflow you want to create..." style="min-height:44px;"></textarea>
+        <button onclick="sendMessage()" id="sendBtn"
+          class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 font-medium flex items-center gap-1 self-end">
+          <span id="sendIcon">&#10148;</span>
+        </button>
+      </div>
+
+      <!-- HITL buttons (shown conditionally) -->
+      <div id="hitlButtons" class="hidden flex gap-2 mt-3 pt-3 border-t">
+        <button onclick="confirmSave()" id="saveBtn"
+          class="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-emerald-700 font-medium flex items-center gap-1">
+          &#128190; Save to Database
+        </button>
+        <button onclick="confirmDelete()" id="deleteBtn"
+          class="bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700 font-medium flex items-center gap-1">
+          &#128465; Delete Workflow
+        </button>
+        <button onclick="clearHITL()" class="text-gray-400 px-3 py-2 text-sm hover:text-gray-600">Cancel</button>
+        <span id="hitlInfo" class="text-xs text-gray-400 self-center ml-auto"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Preview -->
+  <div class="section-card flex flex-col" style="min-height:60vh;">
+    <div class="flex items-center justify-between mb-3 pb-2 border-b">
+      <h2 class="text-base font-bold text-gray-800">&#128269; Preview</h2>
+      <div class="flex items-center gap-2">
+        <span id="previewStatus" class="text-xs text-gray-400">No workflow loaded</span>
+        <button onclick="confirmSave()" id="previewSaveBtn"
+          class="hidden bg-emerald-600 text-white px-3 py-1.5 rounded-lg text-xs hover:bg-emerald-700 font-medium flex items-center gap-1">
+          &#128190; Save to DB
+        </button>
+      </div>
+    </div>
+
+    <div class="overflow-y-auto space-y-3" style="height:55vh;">
+      <!-- States -->
+      <div class="section-card">
+        <div class="flex justify-between items-center mb-2">
+          <h3 class="text-sm font-bold text-gray-700">States</h3>
+          <span id="stateCount" class="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">0</span>
+        </div>
+        <div id="statePreview" class="space-y-1.5">
+          <p class="text-xs text-gray-400 text-center py-4">No states yet</p>
+        </div>
+      </div>
+
+      <!-- Transitions -->
+      <div class="section-card">
+        <div class="flex justify-between items-center mb-2">
+          <h3 class="text-sm font-bold text-gray-700">Transitions</h3>
+          <span id="transCount" class="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">0</span>
+        </div>
+        <div id="transPreview" class="space-y-1.5">
+          <p class="text-xs text-gray-400 text-center py-4">No transitions yet</p>
+        </div>
+      </div>
+
+      <!-- YAML -->
+      <div class="section-card">
+        <details>
+          <summary class="text-sm font-bold text-gray-700 cursor-pointer hover:text-gray-900">YAML / JSON</summary>
+          <pre id="yamlPreview" class="mt-2 p-3 bg-gray-50 rounded text-xs font-mono overflow-x-auto" style="max-height:300px;">{}</pre>
+        </details>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const TYPE_BADGES = {
+  start: 'bg-emerald-100 text-emerald-700',
+  task: 'bg-blue-100 text-blue-700',
+  parallel: 'bg-purple-100 text-purple-700',
+  end: 'bg-gray-100 text-gray-500',
+};
+
+let currentWorkflow = null;
+let hitlAction = null; // 'confirm_save' | 'confirm_delete'
+let hitlId = null;
+let hitlVer = null;
+
+// ── Toast ──
+function toast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2500);
+}
+
+// ── Chat ──
+function addMessage(text, role) {
+  const msgs = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg chat-' + role;
+  div.textContent = text;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function addSystemMessage(text) {
+  const msgs = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg chat-system';
+  div.textContent = text;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function setInputLoading(loading) {
+  const btn = document.getElementById('sendBtn');
+  const icon = document.getElementById('sendIcon');
+  const input = document.getElementById('chatInput');
+  if (loading) {
+    btn.classList.add('opacity-60', 'pointer-events-none');
+    icon.innerHTML = '&#8987;';
+    input.disabled = true;
+  } else {
+    btn.classList.remove('opacity-60', 'pointer-events-none');
+    icon.innerHTML = '&#10148;';
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+// ── SSE Streaming helpers ──
+function showThinking(content) {
+  let el = document.getElementById('thinkingIndicator');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'thinkingIndicator';
+    el.className = 'chat-msg chat-assistant';
+    document.getElementById('chatMessages').appendChild(el);
+  }
+  el.textContent = '🤔 ' + (content || 'Thinking...');
+  scrollChat();
+}
+
+function hideThinking() {
+  const el = document.getElementById('thinkingIndicator');
+  if (el) el.remove();
+}
+
+function addToolCallMessage(name, args) {
+  const msgs = document.getElementById('chatMessages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg chat-system';
+  div.textContent = '🔧 Calling ' + name + '(' + JSON.stringify(args) + ')...';
+  div.dataset.toolName = name;
+  msgs.appendChild(div);
+  scrollChat();
+}
+
+function updateToolResultMessage(name, preview) {
+  const msgs = document.getElementById('chatMessages');
+  const items = msgs.querySelectorAll('[data-tool-name]');
+  const last = items[items.length - 1];
+  if (last) {
+    last.textContent = '🔧 ' + name + ' → ' + (preview || '').slice(0, 100);
+    last.dataset.toolName = '';
+  }
+  scrollChat();
+}
+
+function scrollChat() {
+  const msgs = document.getElementById('chatMessages');
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function processFinalResult(data) {
+  hideThinking();
+  let agentMsg = data.message;
+  if (!agentMsg) {
+    if (data.llm_output) {
+      agentMsg = typeof data.llm_output === 'string' ? data.llm_output.slice(0, 500) : JSON.stringify(data.llm_output);
+    } else if (data.summary) {
+      agentMsg = data.summary;
+    } else if (data.workflow) {
+      const states = data.workflow.states || [];
+      agentMsg = 'Designed workflow with ' + states.length + ' state(s). Review the preview below.';
+    } else if (data.action) {
+      agentMsg = 'Action: ' + data.action;
+    } else if (data.error) {
+      agentMsg = 'Error: ' + data.error;
+    } else {
+      agentMsg = '(no response)';
+    }
+  }
+  addMessage(agentMsg, 'assistant');
+
+  if (data.workflow) {
+    updatePreview(data.workflow);
+  }
+
+  if (data.workflow) {
+    // Always show save HITL when a workflow is present in the response
+    showHITL('save', data.workflow);
+  } else if (data.action === 'confirm_delete') {
+    showHITL('delete', data.workflow);
+  } else {
+    clearHITL();
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  addMessage(text, 'user');
+  input.value = '';
+  setInputLoading(true);
+
+  try {
+    // Try SSE streaming first
+    const resp = await fetch('/api/workflows/ai-design/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: text,
+        workflow_id: hitlId || '{{ wf_id or "" }}',
+        version: hitlVer || '{{ wf_ver or "1.0" }}',
+      }),
+    });
+
+    if (!resp.ok) {
+      // Fallback to non-streaming endpoint
+      const errText = await resp.text();
+      addSystemMessage('SSE error (' + resp.status + '), trying non-streaming: ' + errText.slice(0, 100));
+      await sendMessageNonStreaming(text);
+      return;
+    }
+
+    const contentType = resp.headers.get('content-type') || '';
+    if (!contentType.startsWith('text/event-stream')) {
+      // Not SSE — fallback to non-streaming
+      const data = await resp.json();
+      processFinalResult(data);
+      return;
+    }
+
+    // SSE streaming consumer
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalData = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'thinking') {
+            showThinking(data.content);
+          } else if (data.type === 'tool_call') {
+            hideThinking();
+            addToolCallMessage(data.name, data.args);
+          } else if (data.type === 'tool_result') {
+            updateToolResultMessage(data.name, data.content_preview);
+          } else if (data.type === 'final') {
+            finalData = data.result;
+          }
+        } catch (e) {
+          // Skip malformed SSE events
+          console.warn('SSE parse error:', e, line.slice(0, 100));
+        }
+      }
+    }
+
+    if (finalData) {
+      processFinalResult(finalData);
+    } else {
+      addSystemMessage('No final result received from agent.');
+    }
+  } catch (e) {
+    // Network error — try non-streaming fallback
+    console.warn('SSE stream failed, falling back to non-streaming:', e);
+    await sendMessageNonStreaming(text);
+  } finally {
+    hideThinking();
+    setInputLoading(false);
+  }
+}
+
+/** Fallback: non-streaming POST to /api/workflows/ai-design */
+async function sendMessageNonStreaming(text) {
+  try {
+    const resp = await fetch('/api/workflows/ai-design', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: text,
+        workflow_id: hitlId || '{{ wf_id or "" }}',
+        version: hitlVer || '{{ wf_ver or "1.0" }}',
+      }),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      addSystemMessage('Error: ' + err);
+      return;
+    }
+    const data = await resp.json();
+    processFinalResult(data);
+  } catch (e) {
+    addSystemMessage('Network error: ' + e.message);
+  }
+}
+
+// ── Enter to send ──
+document.addEventListener('DOMContentLoaded', function() {
+  const input = document.getElementById('chatInput');
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  {% if initial_message %}
+  addSystemMessage('{{ initial_message }}');
+  {% endif %}
+});
+
+// ── Preview ──
+function typeBadge(type) {
+  const cls = TYPE_BADGES[type] || 'bg-gray-100';
+  return `<span class="inline-block text-xs px-2 py-0.5 rounded font-medium ${cls}">${type}</span>`;
+}
+
+function escHtml(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function updatePreview(wf) {
+  currentWorkflow = wf;
+  const states = wf.states || [];
+  const transitions = wf.transitions || [];
+
+  document.getElementById('stateCount').textContent = states.length;
+  document.getElementById('transCount').textContent = transitions.length;
+  document.getElementById('previewStatus').textContent = wf.workflow_id + ' v' + wf.version;
+
+  // Show save button when workflow is loaded
+  const saveBtn = document.getElementById('previewSaveBtn');
+  if (states.length > 0) {
+    saveBtn.classList.remove('hidden');
+  } else {
+    saveBtn.classList.add('hidden');
+  }
+
+  // States
+  const stateEl = document.getElementById('statePreview');
+  if (states.length === 0) {
+    stateEl.innerHTML = '<p class="text-xs text-gray-400 text-center py-4">No states yet</p>';
+  } else {
+    stateEl.innerHTML = states.map((s, i) => {
+      const isPar = s.type === 'parallel';
+      return `<div class="border rounded-lg p-3 hover:shadow-sm transition">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-xs text-gray-400 font-mono">#${i+1}</span>
+          <span class="text-sm font-mono font-medium">${escHtml(s.id)}</span>
+          ${typeBadge(s.type)}
+          ${s.task ? `<span class="text-xs text-gray-400 font-mono">${escHtml(s.task)}</span>` : ''}
+        </div>
+        ${s.description ? `<div class="text-xs text-gray-500 ml-1">${escHtml(s.description)}</div>` : ''}
+        ${isPar && s.branches ? `<div class="ml-4 mt-1 text-xs text-purple-600">${s.branches.length} branch(es): ${s.branches.map(b => escHtml(b.id)).join(', ')}</div>` : ''}
+        ${s.instruction ? `<details class="mt-1"><summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">Instruction</summary><pre class="text-xs text-gray-500 mt-1 p-2 bg-gray-50 rounded overflow-x-auto max-h-24">${escHtml(s.instruction)}</pre></details>` : ''}
+        ${(s.inputs && s.inputs.length) ? `<div class="text-xs text-gray-400 mt-1">Inputs: ${s.inputs.join(', ')}</div>` : ''}
+        ${(s.tools && s.tools.length) ? `<div class="text-xs text-gray-400 mt-0.5">Tools: ${s.tools.join(', ')}</div>` : ''}
+      </div>`;
+    }).join('');
+  }
+
+  // Transitions
+  const transEl = document.getElementById('transPreview');
+  if (transitions.length === 0) {
+    transEl.innerHTML = '<p class="text-xs text-gray-400 text-center py-4">No transitions yet</p>';
+  } else {
+    transEl.innerHTML = transitions.map((t, i) =>
+      `<div class="border rounded-lg p-3 hover:shadow-sm transition">
+        <div class="flex items-center gap-2 text-sm font-mono">
+          <span class="font-medium">${escHtml(t.from)}</span>
+          <span class="text-gray-300 text-lg">&rarr;</span>
+          <span class="font-medium">${escHtml(t.to)}</span>
+          ${t.when ? `<span class="text-xs text-gray-400 ml-2 bg-gray-50 px-2 py-0.5 rounded">when: ${escHtml(t.when)}</span>` : '<span class="text-xs text-gray-400 ml-2">(unconditional)</span>'}
+        </div>
+      </div>`
+    ).join('');
+  }
+
+  // YAML
+  document.getElementById('yamlPreview').textContent = JSON.stringify(wf, null, 2);
+}
+
+// ── HITL ──
+function showHITL(action, wf) {
+  hitlAction = action;
+  hitlId = wf.workflow_id || currentWorkflow.workflow_id;
+  hitlVer = wf.version || currentWorkflow.version;
+
+  const btns = document.getElementById('hitlButtons');
+  const info = document.getElementById('hitlInfo');
+  btns.classList.remove('hidden');
+
+  if (action === 'save') {
+    document.getElementById('saveBtn').classList.remove('hidden');
+    document.getElementById('deleteBtn').classList.add('hidden');
+    info.textContent = 'Ready to save: ' + hitlId + ' v' + hitlVer;
+  } else if (action === 'delete') {
+    document.getElementById('saveBtn').classList.add('hidden');
+    document.getElementById('deleteBtn').classList.remove('hidden');
+    info.textContent = 'Ready to delete: ' + hitlId + ' v' + hitlVer;
+  }
+}
+
+function clearHITL() {
+  hitlAction = null;
+  document.getElementById('hitlButtons').classList.add('hidden');
+}
+
+async function confirmSave() {
+  if (!currentWorkflow) {
+    toast('No workflow to save', 'error');
+    return;
+  }
+  // Derive workflow_id/version from currentWorkflow when HITL context is not set
+  const wid = hitlId || currentWorkflow.workflow_id;
+  const wver = hitlVer || currentWorkflow.version;
+  if (!wid || !wver) {
+    toast('Workflow ID or version missing', 'error');
+    return;
+  }
+
+  const body = {
+    description: currentWorkflow.description || '',
+    input_schema: currentWorkflow.input_schema || {},
+    states: (currentWorkflow.states || []).map(s => ({
+      id: s.id,
+      type: s.type,
+      task: s.type === 'task' ? (s.task || null) : null,
+      branches: s.type === 'parallel' ? (s.branches || []).map(b => ({
+        id: b.id, task: b.task || 'ai_task',
+        timeout_sec: b.timeout_sec || 60,
+        instruction: b.instruction || null,
+        inputs: b.inputs || [],
+        tools: b.tools || [],
+        input_schema: b.input_schema || null,
+        output_schema: b.output_schema || null,
+        max_tokens: b.max_tokens || null,
+      })) : [],
+      description: s.description || null,
+      timeout_sec: s.timeout_sec || 60,
+      instruction: s.instruction || null,
+      inputs: s.inputs || [],
+      tools: s.tools || [],
+      input_schema: s.input_schema || null,
+      output_schema: s.output_schema || null,
+      max_tokens: s.max_tokens || null,
+    })),
+    transitions: (currentWorkflow.transitions || []).map(t => ({
+      from: t.from, to: t.to, when: t.when || null,
+    })),
+  };
+
+  const btn = document.getElementById('saveBtn');
+  btn.classList.add('opacity-60', 'pointer-events-none');
+  btn.textContent = 'Saving...';
+
+  try {
+    const resp = await fetch('/api/workflows/' + encodeURIComponent(hitlId) + '/' + encodeURIComponent(hitlVer), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      toast('Save failed: ' + err, 'error');
+      addSystemMessage('Save failed: ' + err.slice(0, 300));
+      return;
+    }
+    toast('Saved successfully!', 'success');
+    clearHITL();
+    // Update HITL context to saved workflow
+    hitlId = wid;
+    hitlVer = wver;
+    addSystemMessage('Workflow saved: ' + wid + ' v' + wver);
+    // Update status
+    document.getElementById('previewStatus').textContent = wid + ' v' + wver + ' (saved)';
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+    addSystemMessage('Save error: ' + e.message);
+  } finally {
+    btn.classList.remove('opacity-60', 'pointer-events-none');
+    btn.innerHTML = '&#128190; Save to Database';
+  }
+}
+
+async function confirmDelete() {
+  if (!hitlId || !hitlVer) {
+    toast('No workflow to delete', 'error');
+    return;
+  }
+  if (!confirm('Delete workflow "' + hitlId + ' v' + hitlVer + '" permanently? This cannot be undone.')) {
+    return;
+  }
+
+  const btn = document.getElementById('deleteBtn');
+  btn.classList.add('opacity-60', 'pointer-events-none');
+  btn.textContent = 'Deleting...';
+
+  try {
+    const resp = await fetch('/api/workflows/' + encodeURIComponent(hitlId) + '/' + encodeURIComponent(hitlVer), {
+      method: 'DELETE',
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      toast('Delete failed: ' + err, 'error');
+      addSystemMessage('Delete failed: ' + err.slice(0, 300));
+      return;
+    }
+    toast('Deleted successfully!', 'success');
+    clearHITL();
+    currentWorkflow = null;
+    updatePreview({ states: [], transitions: [] });
+    document.getElementById('previewStatus').textContent = '(deleted)';
+    addSystemMessage('Workflow deleted: ' + hitlId + ' v' + hitlVer);
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+    addSystemMessage('Delete error: ' + e.message);
+  } finally {
+    btn.classList.remove('opacity-60', 'pointer-events-none');
+    btn.innerHTML = '&#128465; Delete Workflow';
+  }
+}
+
+function clearChat() {
+  if (!confirm('Clear all chat messages?')) return;
+  document.getElementById('chatMessages').innerHTML = `
+    <div class="chat-msg chat-system">
+      Hi! I can help you create and modify workflow definitions. Describe what you want, or ask me to load an existing workflow.
+    </div>`;
+  clearHITL();
+}
+</script>
+{% endblock %}

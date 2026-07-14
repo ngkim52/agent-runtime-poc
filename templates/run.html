@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}Run Workflow{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-bold text-gray-800 mb-6">&#9654; Run Workflow</h1>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+  <!-- Left: Workflow Selector + Input -->
+  <div class="lg:col-span-2">
+    <div class="bg-white rounded-lg shadow p-5 mb-4">
+      <label class="text-sm font-semibold text-gray-700 mb-2 block">Select Workflow</label>
+      <select id="wfSelect" class="w-full border rounded-lg px-4 py-3 text-sm font-mono" onchange="onWfChange()">
+        <option value="">-- Choose a workflow --</option>
+        {% for w in workflows %}
+        <option value="{{ w.workflow_id }}|{{ w.version }}">
+          {{ w.workflow_id }} v{{ w.version }} ({{ w.state_count }} states)
+        </option>
+        {% endfor %}
+      </select>
+
+      <!-- Workflow Info Card -->
+      <div id="wfInfo" class="mt-4 hidden">
+        <div class="bg-blue-50 border border-blue-100 rounded-lg p-4">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="font-mono font-bold text-blue-800" id="wfTitle"></span>
+            <span class="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded" id="wfStateCount"></span>
+          </div>
+          <p class="text-xs text-blue-700 mb-2" id="wfDesc"></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dynamic Input Fields (from input_schema) -->
+    <div id="inputFieldsSection" class="bg-white rounded-lg shadow p-5 mb-4 hidden">
+      <label class="text-sm font-semibold text-gray-700 mb-3 block">Input Parameters</label>
+      <div id="inputFields" class="space-y-3"></div>
+    </div>
+
+    <!-- Advanced: Raw JSON -->
+    <div class="bg-white rounded-lg shadow p-5 mb-4">
+      <details>
+        <summary class="text-sm font-semibold text-gray-700 cursor-pointer hover:text-gray-900">&#9881; Advanced: Raw JSON Input</summary>
+        <textarea id="inputJson" rows="4" class="w-full border rounded-lg px-4 py-3 text-xs font-mono bg-gray-50 mt-3"
+          placeholder='{"key": "value"}'></textarea>
+      </details>
+    </div>
+
+    <button id="runBtn" onclick="runWorkflow()" disabled
+      class="w-full bg-blue-600 text-white px-6 py-3 rounded-lg text-sm font-bold hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+      <span id="runIcon">&#9654;</span> <span id="runLabel">Run Workflow</span>
+    </button>
+  </div>
+
+  <!-- Right: Quick Info -->
+  <div class="lg:col-span-1">
+    <div class="bg-white rounded-lg shadow p-5">
+      <h3 class="text-sm font-semibold text-gray-700 mb-3">&#9432; About</h3>
+      <ul class="text-xs text-gray-500 space-y-2">
+        <li>Select a workflow from the dropdown</li>
+        <li>Fill in the input fields (required fields marked with *)</li>
+        <li>Or use the raw JSON input under "Advanced"</li>
+        <li>Click "Run" to start execution</li>
+        <li>You'll be redirected to the progress page</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+const wfData = {};
+{% for w in workflows %}
+wfData['{{ w.workflow_id }}|{{ w.version }}'] = {{ w | tojson }};
+{% endfor %}
+
+function buildInputFields(schema) {
+  const container = document.getElementById('inputFields');
+  container.innerHTML = '';
+  if (!schema || !schema.properties) return;
+
+  const props = schema.properties || {};
+  const required = schema.required || [];
+
+  for (const [key, prop] of Object.entries(props)) {
+    const isRequired = required.includes(key);
+    const desc = prop.description || prop.title || key;
+    const fieldType = prop.type === 'number' || prop.type === 'integer' ? 'number'
+                    : prop.type === 'boolean' ? 'checkbox'
+                    : 'text';
+
+    const div = document.createElement('div');
+    div.className = 'flex flex-col gap-1';
+
+    const label = document.createElement('label');
+    label.className = 'text-xs font-semibold text-gray-600';
+    label.textContent = (isRequired ? '* ' : '') + desc;
+    label.htmlFor = 'input_' + key;
+
+    if (fieldType === 'checkbox') {
+      const wrap = document.createElement('div');
+      wrap.className = 'flex items-center gap-2';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.id = 'input_' + key;
+      cb.className = 'w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500';
+      wrap.appendChild(cb);
+      wrap.appendChild(label);
+      div.appendChild(wrap);
+    } else {
+      div.appendChild(label);
+      const input = document.createElement('input');
+      input.type = fieldType;
+      input.id = 'input_' + key;
+      input.placeholder = desc;
+      input.required = isRequired;
+      if (prop.default) input.value = prop.default;
+      if (fieldType === 'number') {
+        input.step = prop.type === 'integer' ? '1' : '0.1';
+        if (prop.minimum !== undefined) input.min = prop.minimum;
+        if (prop.maximum !== undefined) input.max = prop.maximum;
+      }
+      input.className = 'w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-300' +
+        (isRequired ? ' border-blue-200 bg-blue-50' : '');
+      div.appendChild(input);
+    }
+
+    if (prop.description) {
+      const hint = document.createElement('p');
+      hint.className = 'text-[10px] text-gray-400';
+      hint.textContent = prop.description;
+      div.appendChild(hint);
+    }
+
+    container.appendChild(div);
+  }
+}
+
+function collectInputFromFields() {
+  const schema = document.getElementById('inputFieldsSection').dataset.schema;
+  if (!schema) return null;
+  const props = JSON.parse(schema).properties || {};
+  const result = {};
+  for (const key of Object.keys(props)) {
+    const el = document.getElementById('input_' + key);
+    if (!el) continue;
+    if (el.type === 'checkbox') {
+      result[key] = el.checked;
+    } else if (el.type === 'number') {
+      result[key] = el.value ? (el.step === '1' ? parseInt(el.value) : parseFloat(el.value)) : null;
+    } else {
+      if (el.value) result[key] = el.value;
+    }
+  }
+  return result;
+}
+
+function onWfChange() {
+  const val = document.getElementById('wfSelect').value;
+  const info = document.getElementById('wfInfo');
+  const btn = document.getElementById('runBtn');
+  const inputSection = document.getElementById('inputFieldsSection');
+
+  if (!val) {
+    info.classList.add('hidden');
+    inputSection.classList.add('hidden');
+    btn.disabled = true;
+    return;
+  }
+
+  const wf = wfData[val];
+  if (!wf) return;
+
+  document.getElementById('wfTitle').textContent = wf.workflow_id + ' v' + wf.version;
+  document.getElementById('wfStateCount').textContent = wf.state_count + ' states';
+  document.getElementById('wfDesc').textContent = wf.description || '(no description)';
+  info.classList.remove('hidden');
+  btn.disabled = false;
+
+  // Build dynamic input fields from input_schema
+  if (wf.input_schema && wf.input_schema.properties) {
+    inputSection.classList.remove('hidden');
+    inputSection.dataset.schema = JSON.stringify(wf.input_schema);
+    buildInputFields(wf.input_schema);
+  } else {
+    inputSection.classList.add('hidden');
+  }
+
+  // Pre-fill default JSON
+  const ta = document.getElementById('inputJson');
+  if (!ta.value.trim()) {
+    ta.value = JSON.stringify({project_root: '.', description: 'POC ' + wf.workflow_id + ' analysis'}, null, 2);
+  }
+}
+
+async function runWorkflow() {
+  const val = document.getElementById('wfSelect').value;
+  if (!val) return;
+  const [workflow_id, version] = val.split('|');
+
+  const btn = document.getElementById('runBtn');
+  const icon = document.getElementById('runIcon');
+  const label = document.getElementById('runLabel');
+  btn.disabled = true;
+  icon.innerHTML = '&#8987;';
+  label.textContent = 'Starting...';
+
+  // Collect input: prefer form fields over raw JSON
+  let input = collectInputFromFields();
+
+  // If no form fields, fall back to raw JSON
+  if (!input || Object.keys(input).length === 0) {
+    try {
+      const raw = document.getElementById('inputJson').value.trim();
+      if (raw) input = JSON.parse(raw);
+      else input = {};
+    } catch(e) {
+      alert('Invalid JSON in raw input: ' + e.message);
+      btn.disabled = false;
+      icon.innerHTML = '&#9654;';
+      label.textContent = 'Run Workflow';
+      return;
+    }
+  }
+
+  try {
+    const resp = await fetch('/api/instances/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({workflow_id, version, input}),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      alert('Failed to start: ' + err);
+      btn.disabled = false;
+      icon.innerHTML = '&#9654;';
+      label.textContent = 'Run Workflow';
+      return;
+    }
+    const data = await resp.json();
+    window.location.href = '/instances/' + data.instance_id + '/progress';
+  } catch(e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    icon.innerHTML = '&#9654;';
+    label.textContent = 'Run Workflow';
+  }
+}
+</script>
+{% endblock %}

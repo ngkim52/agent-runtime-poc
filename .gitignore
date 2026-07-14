@@ -1,0 +1,44 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual Environment ─────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Environment & Secrets ──────────────────────────────
+.env
+.env.local
+*.key
+
+# ── IDE / Editor ───────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Test & Coverage ────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Docker ──────────────────────────────────────────────
+.docker/
+
+# ── Sisyphus ────────────────────────────────────────────
+.sisyphus/
+
+# ── Temporary / Scratch ────────────────────────────────
+tmp_*.py
+*.tmp

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Workflow Manager{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-gray-800">
+  <nav class="bg-white shadow-sm border-b">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-6">
+      <a href="/" class="text-lg font-bold text-blue-700">Biz Orchestrator</a>
+      <a href="/workflows" class="text-sm hover:text-blue-600">Workflows</a>
+      <a href="/instances" class="text-sm hover:text-blue-600">Instances</a>
+      <a href="/run" class="text-sm hover:text-blue-600 font-medium text-blue-700">&#9654; Run</a>
+      <a href="/workflows/ai-create" class="text-sm hover:text-blue-600">AI Workflow</a>
+    </div>
+  </nav>
+  <main class="max-w-7xl mx-auto px-4 py-6">
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

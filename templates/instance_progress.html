@@ -1,0 +1,710 @@
+{% extends "base.html" %}
+{% block title %}Progress {{ inst.instance_id[:16] }}...{% endblock %}
+{% block content %}
+
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+
+<!-- Injected JSON data for SVG flowchart -->
+<script>
+window.__STATES = {{ states_json | safe }};
+window.__TRANSITIONS = {{ transitions_json | safe }};
+window.__BRANCHES = {{ branches_json | safe }};
+window.__STATUSES = {{ step_statuses_json | safe }};
+window.__TOTAL_STEPS = {{ total_steps }};
+window.__COMPLETED_STEPS = {{ completed_steps }};
+window.__PROGRESS_PERCENT = {{ progress_percent }};
+</script>
+
+<div class="mb-4 flex items-center justify-between">
+  <a href="/instances" class="text-blue-600 hover:underline text-sm">&larr; Instances</a>
+  <div class="flex gap-2">
+    <a href="/instances/{{ inst.instance_id }}" class="text-blue-600 hover:underline text-sm">Detail JSON</a>
+    {% if inst.status == 'COMPLETED' %}
+    <a href="/instances/{{ inst.instance_id }}/output" class="text-green-600 hover:underline text-sm font-medium">&#128196; View Output</a>
+    {% endif %}
+    {% if inst.status == 'FAILED' %}
+    <button id="resumeBtn" onclick="resumeInstance()" class="bg-amber-500 hover:bg-amber-600 text-white text-sm px-3 py-0.5 rounded font-medium transition-colors">
+      &#8635; Resume
+    </button>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Instance Header -->
+<div class="bg-white rounded-lg shadow p-5 mb-6">
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div>
+      <div class="flex items-center gap-3 mb-1">
+        <h1 class="text-lg font-mono font-bold text-gray-800">{{ inst.instance_id }}</h1>
+        <span id="statusBadge" class="text-sm px-3 py-0.5 rounded font-medium
+          {% if inst.status == 'COMPLETED' %}bg-green-100 text-green-700
+          {% elif inst.status == 'RUNNING' %}bg-blue-100 text-blue-700
+          {% else %}bg-red-100 text-red-700{% endif %}">
+          {{ inst.status }}
+        </span>
+      </div>
+      <div class="text-sm text-gray-500">
+        <span class="mr-4 font-semibold">{{ inst.workflow_id }} v{{ inst.workflow_version }}</span>
+        <span class="mr-4">Created: {{ inst.created_at[:19] }}</span>
+        {% if inst.finished_at %}
+        <span>Finished: <span id="finishedAt">{{ inst.finished_at[:19] }}</span></span>
+        {% endif %}
+        <span class="ml-2" id="duration"></span>
+      </div>
+    </div>
+    <div class="text-right text-sm text-gray-500">
+      <!-- Progress Gauge (T2) -->
+      <div class="mb-2">
+        <div class="flex items-center justify-end gap-2 text-xs text-gray-500 mb-1">
+          <span class="font-medium">Progress</span>
+          <span class="font-bold" id="doneCount">{{ completed_steps }}</span>
+          <span>/</span>
+          <span id="totalCount">{{ total_steps }}</span>
+          <span class="font-bold text-gray-700" id="progressPct">{{ progress_percent }}%</span>
+        </div>
+        <div class="bg-gray-200 rounded-full h-2.5 w-40 overflow-hidden ml-auto">
+          <div id="progressBar" class="h-full rounded-full bg-gradient-to-r from-blue-500 to-blue-600 transition-all duration-500 ease-out"
+               style="width: {{ progress_percent }}%"></div>
+        </div>
+      </div>
+      <div class="text-xs text-gray-400" id="currentStepDisplay">
+        {% if inst.status == 'RUNNING' %}
+        <span class="inline-flex items-center gap-1 text-blue-600">
+          <span class="h-2 w-2 rounded-full bg-blue-500 animate-pulse inline-block"></span> Running...
+        </span>
+        {% elif inst.status == 'COMPLETED' %}
+        <span class="text-green-600">&#10004; Completed</span>
+        {% elif inst.status == 'FAILED' %}
+        <span class="text-red-600">&#10008; Failed</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- SVG Flowchart (T1) -->
+  <div class="mt-4 border-t pt-4" id="flowchartSection">
+    <div class="flex items-center gap-2 mb-3">
+      <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Workflow Flowchart</h3>
+      <div id="flowchartLegend" class="flex items-center gap-3 text-[10px] text-gray-400 ml-auto"></div>
+    </div>
+    <div class="overflow-x-auto pb-2">
+      <svg id="flowchart-svg" class="min-w-full" style="min-height: 120px;"></svg>
+    </div>
+  </div>
+</div>
+
+<!-- Step Timeline -->
+<h2 class="text-base font-bold text-gray-800 mb-4 flex items-center gap-2">
+  <span class="w-2 h-2 rounded-full bg-blue-500 inline-block"></span> Step Timeline
+</h2>
+
+<div class="space-y-2" id="stepList">
+  {% for step in inst.steps %}
+  <div class="bg-white rounded-lg shadow-sm border hover:shadow-md transition step-card
+    {% if step.status == 'OK' %}border-l-green-500
+    {% elif step.status == 'FAIL' %}border-l-red-500
+    {% else %}border-l-blue-400{% endif %}"
+       data-state="{{ step.state_id }}"
+       data-status="{{ step.status }}"
+       style="border-left-width: 4px;">
+    <div class="p-4 cursor-pointer" onclick="toggleStep(this)">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <!-- Step icon (SVG) — T3 improvement -->
+          <div class="h-9 w-9 rounded-full flex items-center justify-center shrink-0
+            {% if step.status == 'OK' %}bg-green-100
+            {% elif step.status == 'FAIL' %}bg-red-100
+            {% else %}bg-blue-100{% endif %}">
+            {% if step.status == 'OK' %}
+            <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+            {% elif step.status == 'FAIL' %}
+            <svg class="w-5 h-5 text-red-600" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+            {% else %}
+            <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6l4 2"/><circle cx="12" cy="12" r="10"/></svg>
+            {% endif %}
+          </div>
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-mono font-bold text-gray-800 text-sm">{{ step.state_id }}</span>
+              {% set sd_title = state_map.get(step.state_id, {}) %}
+              {% if sd_title.get('description') %}
+              <span class="text-xs text-gray-500 truncate max-w-[200px] md:max-w-[320px] hidden xs:inline" title="{{ sd_title['description'] }}">— {{ sd_title['description'] }}</span>
+              {% endif %}
+              {% if step.task_type %}
+              <span class="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded font-mono">{{ step.task_type }}</span>
+              {% endif %}
+              <span class="text-xs px-2 py-0.5 rounded font-medium
+                {% if step.status == 'OK' %}bg-green-100 text-green-700
+                {% elif step.status == 'FAIL' %}bg-red-100 text-red-700
+                {% else %}bg-blue-100 text-blue-700{% endif %}">
+                {{ step.status }}
+              </span>
+            </div>
+            <div class="text-xs text-gray-400 mt-0.5 flex items-center gap-2">
+              <span>{{ step.started_at[11:19] }}</span>
+              {% if step.finished_at %}
+              <span>~ {{ step.finished_at[11:19] }}</span>
+              <span class="step-duration font-mono text-gray-500 font-medium"
+                    data-started="{{ step.started_at }}"
+                    data-finished="{{ step.finished_at }}"></span>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2 text-xs text-gray-400">
+          {% set sd = state_map.get(step.state_id, {}) %}
+          {% if sd.get('inputs') %}
+          <span class="hidden md:inline text-gray-400">in: {{ sd['inputs']|join(',') }}</span>
+          {% endif %}
+          {% if step.result and step.result != {} %}
+          <span class="expand-icon text-gray-400 hover:text-gray-600 transition-colors">&#9660;</span>
+          {% endif %}
+        </div>
+      </div>
+      <!-- Step definition mini info -->
+      {% set sd = state_map.get(step.state_id, {}) %}
+      {% if sd.get('inputs') or sd.get('tools') or sd.get('description') %}
+      <div class="flex flex-wrap gap-2 mt-2 text-xs">
+        {% if sd.get('inputs') %}
+        <span class="bg-purple-50 text-purple-600 px-2 py-0.5 rounded font-mono border border-purple-100"
+              title="Inputs from previous steps">&#8592; inputs: {{ sd['inputs']|join(', ') }}</span>
+        {% endif %}
+        {% if sd.get('tools') %}
+        <span class="bg-amber-50 text-amber-600 px-2 py-0.5 rounded font-mono border border-amber-100"
+              title="Tools available">&#9881; tools: {{ sd['tools']|join(', ') }}</span>
+        {% endif %}
+        {% if sd.get('description') %}
+        <span class="text-gray-400 italic">{{ sd['description'] }}</span>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if sd.get('instruction') %}
+      <div class="mt-1 text-xs text-gray-400 truncate" title="{{ sd['instruction'] }}">💬 {{ sd['instruction'][:120] }}{% if sd['instruction']|length > 120 %}...{% endif %}</div>
+      {% endif %}
+    </div>
+
+    <!-- Step Output Schema (collapsible) -->
+    {% set sd = state_map.get(step.state_id, {}) %}
+    {% set has_schema = sd.get('output_schema') and sd['output_schema']|length > 0 %}
+
+    <!-- Step Result (collapsible) — T3: smooth max-height expand/collapse -->
+    {% if step.result and step.result != {} or has_schema %}
+    <div class="step-body step-body-closed border-t bg-gray-50 rounded-b-lg overflow-hidden transition-all duration-300 ease-in-out"
+         style="max-height: 0; opacity: 0;">
+      <div class="p-4 space-y-3 overflow-x-auto">
+        {% if has_schema %}
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs font-semibold text-gray-400">Output Schema</span>
+            <span class="text-[10px] text-gray-300">(expected structure)</span>
+          </div>
+          <pre class="text-xs font-mono text-gray-500 bg-white border rounded p-2 max-h-24 overflow-y-auto">{{ sd['output_schema'] | tojson(indent=2) }}</pre>
+        </div>
+        {% endif %}
+        {% if step.result and step.result != {} %}
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs font-semibold text-gray-500">Output</span>
+            <span class="text-[10px] text-gray-300">(actual result)</span>
+          </div>
+          {% if step.result is mapping %}
+          {% for key, val in step.result.items() %}
+          <div class="mb-2">
+            <div class="text-xs font-semibold text-gray-500 mb-1 font-mono">{{ key }}</div>
+            {% if key == 'markdown' and val is string and val|length > 20 %}
+            <div class="bg-white border rounded p-3 max-h-64 overflow-y-auto">
+              <div class="markdown-preview text-xs text-gray-700">{{ val }}</div>
+              <script>
+                (function() {
+                  var el = document.currentScript.parentElement.querySelector('.markdown-preview');
+                  if (el && typeof marked !== 'undefined') {
+                    el.innerHTML = marked.parse(el.textContent);
+                    el.className = 'prose prose-xs max-w-none';
+                  }
+                })();
+              </script>
+            </div>
+            {% else %}
+            <pre class="text-xs font-mono text-gray-700 bg-white border rounded p-2 max-h-32 overflow-y-auto whitespace-pre-wrap">{{ val | tojson(indent=2) if val is mapping or val is sequence else val }}</pre>
+            {% endif %}
+          </div>
+          {% endfor %}
+          {% else %}
+          <pre class="text-xs font-mono text-gray-700 bg-white border rounded p-2 max-h-48 overflow-y-auto whitespace-pre-wrap">{{ step.result | tojson_unicode(indent=2) }}</pre>
+          {% endif %}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if step.error %}
+    <div class="border-t bg-red-50 rounded-b-lg p-4">
+      <div class="text-xs font-semibold text-red-700 mb-1">Error</div>
+      <div class="text-xs font-mono text-red-600">{{ step.error }}</div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{% raw %}
+<!-- ════════════════════════════════════════════════════════════════
+     T1: SVG Flowchart Renderer
+     ════════════════════════════════════════════════════════════════ -->
+<script>
+/**
+ * Renders a horizontal left→right SVG flowchart from injected JSON data
+ * (window.__STATES, __TRANSITIONS, __BRANCHES, __STATUSES).
+ * Uses BFS topological ordering for layout, bezier curves for arrows,
+ * and status-based color coding.
+ */
+function renderFlowchart() {
+  const states = window.__STATES || [];
+  const transitions = window.__TRANSITIONS || [];
+  const branches = window.__BRANCHES || {};
+  const statuses = window.__STATUSES || {};
+  if (!states.length) return;
+
+  // ── 1. BFS level assignment ──
+  const levels = {};
+  const queue = [{ id: 'START', level: 0 }];
+  const visited = new Set();
+  while (queue.length) {
+    const { id, level } = queue.shift();
+    if (visited.has(id)) continue;
+    visited.add(id);
+    if (!levels[level]) levels[level] = [];
+    levels[level].push(id);
+    for (const t of transitions) {
+      if (t.from === id && !visited.has(t.to)) {
+        queue.push({ id: t.to, level: level + 1 });
+      }
+    }
+  }
+  // Handle orphan states not reachable from START (put at end)
+  for (const s of states) {
+    if (!visited.has(s.id)) {
+      const maxL = Math.max(...Object.keys(levels).map(Number), -1);
+      const l = maxL + 1;
+      if (!levels[l]) levels[l] = [];
+      levels[l].push(s.id);
+      visited.add(s.id);
+    }
+  }
+
+  // ── 2. Layout constants ──
+  const H_SPACING = 170, V_SPACING = 90;
+  const TASK_W = 130, TASK_H = 48;
+  const PARALLEL_W = 170, PARALLEL_H = 90;
+  const CIRCLE_R = 16;
+
+  const levelKeys = Object.keys(levels).sort((a, b) => +a - +b);
+  if (!levelKeys.length) return;
+  const maxInLevel = Math.max(...levelKeys.map(k => levels[k].length));
+  const svgW = Math.max(levelKeys.length * H_SPACING + 100, 400);
+  const svgH = Math.max(maxInLevel * V_SPACING + 80, 120);
+
+  // ── 3. Compute (x,y) positions ──
+  const pos = {};
+  for (const lv of levelKeys) {
+    const nodes = levels[lv];
+    const totalH = (nodes.length - 1) * V_SPACING;
+    const startY = (svgH - totalH) / 2;
+    const x = +lv * H_SPACING + 60;
+    nodes.forEach((id, i) => {
+      pos[id] = { x: x, y: startY + i * V_SPACING };
+    });
+  }
+
+  // ── 4. Helper: get edge point for arrow connections ──
+  function getNodeEdge(id, side) {
+    const p = pos[id];
+    if (!p) return null;
+    const s = states.find(st => st.id === id);
+    if (!s) return { x: p.x, y: p.y };
+    if (s.type === 'start' || s.type === 'end') {
+      return side === 'right' ? { x: p.x + CIRCLE_R, y: p.y } : { x: p.x - CIRCLE_R, y: p.y };
+    }
+    const halfW = s.type === 'parallel' ? PARALLEL_W / 2 : TASK_W / 2;
+    return side === 'right' ? { x: p.x + halfW, y: p.y } : { x: p.x - halfW, y: p.y };
+  }
+
+  // ── 5. Build SVG ──
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('flowchart-svg');
+  if (!svg) return;
+  svg.setAttribute('viewBox', '0 0 ' + svgW + ' ' + svgH);
+  svg.style.width = svgW + 'px';
+  svg.style.height = svgH + 'px';
+  svg.innerHTML = '';
+
+  // Defs: arrowhead marker
+  const defs = document.createElementNS(ns, 'defs');
+  defs.innerHTML =
+    '<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">' +
+    '<polygon points="0 0, 10 3.5, 0 7" fill="#9CA3AF"/>' +
+    '</marker>';
+  svg.appendChild(defs);
+
+  // Color mapping
+  function getColor(id) {
+    const st = statuses[id];
+    if (st === 'OK') return '#10B981';
+    if (st === 'FAIL') return '#EF4444';
+    if (st === 'RUNNING') return '#3B82F6';
+    return '#9CA3AF';
+  }
+
+  // ── 6. Draw arrows (behind nodes) ──
+  for (const t of transitions) {
+    if (!pos[t.from] || !pos[t.to]) continue;
+    const fromP = getNodeEdge(t.from, 'right');
+    const toP = getNodeEdge(t.to, 'left');
+    if (!fromP || !toP) continue;
+    const mx = (fromP.x + toP.x) / 2;
+    const d = 'M ' + fromP.x + ' ' + fromP.y +
+             ' C ' + mx + ' ' + fromP.y + ', ' + mx + ' ' + toP.y + ', ' + toP.x + ' ' + toP.y;
+
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('stroke', '#D1D5DB');
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('fill', 'none');
+    path.setAttribute('marker-end', 'url(#arrowhead)');
+    svg.appendChild(path);
+  }
+
+      // ── Helper: short label from description ──
+  function shortLabel(s) {
+    if (!s || !s.description) return '';
+    const desc = s.description;
+    // Take first meaningful fragment (before 1st comma, period, colon, or —)
+    const sep = desc.search(/[,.:—–\-;]/);
+    const label = sep > 0 ? desc.slice(0, sep).trim() : desc.slice(0, 30).trim();
+    return label.length > 30 ? label.slice(0, 28) + '…' : label;
+  }
+
+  // ── 7. Draw nodes ──
+  for (const id of Object.keys(pos)) {
+    const p = pos[id];
+    const s = states.find(st => st.id === id);
+    if (!s) continue;
+    const color = getColor(id);
+    const sLabel = shortLabel(s);
+
+    if (s.type === 'start' || s.type === 'end') {
+      // ── Circle node ──
+      const circle = document.createElementNS(ns, 'circle');
+      circle.setAttribute('cx', p.x);
+      circle.setAttribute('cy', p.y);
+      circle.setAttribute('r', CIRCLE_R);
+      circle.setAttribute('fill', s.type === 'start' ? '#10B981' : '#EF4444');
+      circle.setAttribute('stroke', '#fff');
+      circle.setAttribute('stroke-width', '3');
+      // Tooltip
+      if (s.description) {
+        const title = document.createElementNS(ns, 'title');
+        title.textContent = s.description;
+        circle.appendChild(title);
+      }
+      svg.appendChild(circle);
+      // Label
+      const text = document.createElementNS(ns, 'text');
+      text.setAttribute('x', p.x);
+      text.setAttribute('y', s.type === 'start' ? p.y - CIRCLE_R - 8 : p.y + CIRCLE_R + 16);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', '11');
+      text.setAttribute('font-weight', '600');
+      text.setAttribute('fill', '#6B7280');
+      text.textContent = s.type === 'start' ? 'Start' : 'End';
+      svg.appendChild(text);
+    } else if (s.type === 'parallel') {
+      // ── Parallel node: large rounded rect + branch labels ──
+      const g = document.createElementNS(ns, 'g');
+      // Dashed border for parallel
+      const rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', p.x - PARALLEL_W / 2);
+      rect.setAttribute('y', p.y - PARALLEL_H / 2);
+      rect.setAttribute('width', PARALLEL_W);
+      rect.setAttribute('height', PARALLEL_H);
+      rect.setAttribute('rx', '8');
+      rect.setAttribute('fill', color + '12');
+      rect.setAttribute('stroke', color);
+      rect.setAttribute('stroke-width', '2');
+      rect.setAttribute('stroke-dasharray', '5,3');
+      if (s.description) {
+        const title = document.createElementNS(ns, 'title');
+        title.textContent = s.description;
+        rect.appendChild(title);
+      }
+      g.appendChild(rect);
+      // State ID label (top-left inside)
+      const label = document.createElementNS(ns, 'text');
+      label.setAttribute('x', p.x - PARALLEL_W / 2 + 10);
+      label.setAttribute('y', p.y - PARALLEL_H / 2 + 16);
+      label.setAttribute('font-size', '9');
+      label.setAttribute('font-weight', 'bold');
+      label.setAttribute('fill', color);
+      label.textContent = '⧉ ' + id;
+      g.appendChild(label);
+      // Description subtitle below ID
+      if (sLabel) {
+        const sub = document.createElementNS(ns, 'text');
+        sub.setAttribute('x', p.x - PARALLEL_W / 2 + 14);
+        sub.setAttribute('y', p.y - PARALLEL_H / 2 + 30);
+        sub.setAttribute('font-size', '7');
+        sub.setAttribute('fill', '#9CA3AF');
+        sub.textContent = sLabel;
+        g.appendChild(sub);
+      }
+      // Branch labels
+      const branchList = branches[id] || [];
+      branchList.forEach((b, i) => {
+        const yy = p.y - PARALLEL_H / 2 + 34 + i * 20;
+        const bt = document.createElementNS(ns, 'text');
+        bt.setAttribute('x', p.x - PARALLEL_W / 2 + 14);
+        bt.setAttribute('y', yy);
+        bt.setAttribute('font-size', '9');
+        bt.setAttribute('fill', '#6B7280');
+        bt.textContent = '↳ ' + b.id;
+        g.appendChild(bt);
+        // Status dot per branch
+        const branchSt = statuses[b.id];
+        if (branchSt) {
+          const dot = document.createElementNS(ns, 'circle');
+          dot.setAttribute('cx', p.x + PARALLEL_W / 2 - 10);
+          dot.setAttribute('cy', yy - 3);
+          dot.setAttribute('r', '4');
+          dot.setAttribute('fill', getColor(b.id));
+          g.appendChild(dot);
+        }
+      });
+      svg.appendChild(g);
+    } else {
+      // ── Task node: rounded rect ──
+      const g = document.createElementNS(ns, 'g');
+      const rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', p.x - TASK_W / 2);
+      rect.setAttribute('y', p.y - TASK_H / 2);
+      rect.setAttribute('width', TASK_W);
+      rect.setAttribute('height', TASK_H);
+      rect.setAttribute('rx', '6');
+      rect.setAttribute('fill', color + '15');
+      rect.setAttribute('stroke', color);
+      rect.setAttribute('stroke-width', '2');
+      // Tooltip
+      if (s.description) {
+        const title = document.createElementNS(ns, 'title');
+        title.textContent = s.description;
+        rect.appendChild(title);
+      }
+      g.appendChild(rect);
+      // Label centered (ID)
+      const label = document.createElementNS(ns, 'text');
+      label.setAttribute('x', p.x);
+      label.setAttribute('y', p.y - 3);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('font-size', '11');
+      label.setAttribute('font-weight', 'bold');
+      label.setAttribute('fill', '#374151');
+      label.textContent = id;
+      g.appendChild(label);
+      // Description subtitle below ID
+      if (sLabel) {
+        const sub = document.createElementNS(ns, 'text');
+        sub.setAttribute('x', p.x);
+        sub.setAttribute('y', p.y + 13);
+        sub.setAttribute('text-anchor', 'middle');
+        sub.setAttribute('font-size', '7');
+        sub.setAttribute('fill', '#9CA3AF');
+        sub.textContent = sLabel;
+        g.appendChild(sub);
+      }
+      // Status indicator dot (top-right corner)
+      if (statuses[id]) {
+        const dot = document.createElementNS(ns, 'circle');
+        dot.setAttribute('cx', p.x + TASK_W / 2 - 5);
+        dot.setAttribute('cy', p.y - TASK_H / 2 + 5);
+        dot.setAttribute('r', '4');
+        dot.setAttribute('fill', getColor(id));
+        dot.setAttribute('stroke', '#fff');
+        dot.setAttribute('stroke-width', '1.5');
+        g.appendChild(dot);
+      }
+      svg.appendChild(g);
+    }
+  }
+
+  // ── 8. Render legend ──
+  const legend = document.getElementById('flowchartLegend');
+  if (legend) {
+    const items = [
+      { color: '#10B981', label: 'OK' },
+      { color: '#3B82F6', label: 'Running' },
+      { color: '#EF4444', label: 'Failed' },
+      { color: '#9CA3AF', label: 'Pending' },
+    ];
+    legend.innerHTML = items.map(function(item) {
+      var i =
+        '<span class="flex items-center gap-1">' +
+        '<span class="w-2.5 h-2.5 rounded-full inline-block" style="background:' + item.color + '"></span>' +
+        item.label +
+        '</span>';
+      return i;
+    }).join('');
+  }
+}
+
+// ── 9. Duration calculation for step cards ──
+function computeDurations() {
+  document.querySelectorAll('.step-card').forEach(function(card) {
+    var durEl = card.querySelector('.step-duration');
+    if (!durEl) return;
+    var started = durEl.getAttribute('data-started');
+    var finished = durEl.getAttribute('data-finished');
+    if (!started || !finished) {
+      durEl.textContent = '';
+      return;
+    }
+    var t0 = new Date(started);
+    var t1 = new Date(finished);
+    var ms = t1 - t0;
+    if (ms < 0) { durEl.textContent = ''; return; }
+    if (ms < 1000) { durEl.textContent = ms + 'ms'; return; }
+    if (ms < 60000) { durEl.textContent = (ms / 1000).toFixed(1) + 's'; return; }
+    var m = Math.floor(ms / 60000);
+    var s = Math.floor((ms % 60000) / 1000);
+    durEl.textContent = m + 'm ' + s + 's';
+  });
+}
+
+// ── 10. Smooth expand/collapse for step cards ──
+function toggleStep(header) {
+  var card = header.closest('.step-card');
+  var body = card.querySelector('.step-body');
+  var icon = header.querySelector('.expand-icon');
+  if (!body) return;
+  if (body.classList.contains('step-body-open')) {
+    // Collapse
+    body.style.maxHeight = '0px';
+    body.style.opacity = '0';
+    body.classList.remove('step-body-open');
+    body.classList.add('step-body-closed');
+    if (icon) icon.textContent = '\u25BC'; // ▼
+  } else {
+    // Expand
+    body.style.maxHeight = body.scrollHeight + 50 + 'px';
+    body.style.opacity = '1';
+    body.classList.remove('step-body-closed');
+    body.classList.add('step-body-open');
+    if (icon) icon.textContent = '\u25B2'; // ▲
+  }
+}
+
+// ── 11. Run on load ──
+document.addEventListener('DOMContentLoaded', function() {
+  renderFlowchart();
+  computeDurations();
+});
+</script>
+
+{% endraw %}
+<!-- ════════════════════════════════════════════════════════════════
+     T2: Polling (auto-refresh for running instances)
+     ════════════════════════════════════════════════════════════════ -->
+{% if inst.status == 'RUNNING' %}
+<script>
+let pollTimer = null;
+
+async function pollProgress() {
+  try {
+    const resp = await fetch('/api/instances/{{ inst.instance_id }}');
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    // Update status badge
+    const badge = document.getElementById('statusBadge');
+    badge.textContent = data.status;
+    badge.className = 'text-sm px-3 py-0.5 rounded font-medium ' +
+      (data.status === 'COMPLETED' ? 'bg-green-100 text-green-700' :
+       data.status === 'RUNNING' ? 'bg-blue-100 text-blue-700' :
+       'bg-red-100 text-red-700');
+
+    // Update current step display
+    const csd = document.getElementById('currentStepDisplay');
+    if (data.status === 'COMPLETED') {
+      csd.innerHTML = '<span class="text-green-600">&#10004; Completed</span>';
+      document.getElementById('finishedAt').textContent = data.finished_at ? data.finished_at.slice(0,19) : '';
+      clearInterval(pollTimer);
+      location.reload();
+      return;
+    } else if (data.status === 'FAILED') {
+      csd.innerHTML = '<span class="text-red-600">&#10008; Failed</span>';
+      if (data.finished_at) document.getElementById('finishedAt').textContent = data.finished_at.slice(0,19);
+      clearInterval(pollTimer);
+      location.reload();
+      return;
+    }
+
+    // Update progress gauge
+    const steps = data.steps || [];
+    const doneSteps = steps.filter(function(s) { return s.status === 'OK' || s.status === 'FAIL'; }).length;
+    const totalSteps = steps.length;
+    const pct = totalSteps > 0 ? Math.round(doneSteps / totalSteps * 100) : 0;
+
+    document.getElementById('doneCount').textContent = doneSteps;
+    document.getElementById('totalCount').textContent = totalSteps;
+    document.getElementById('progressPct').textContent = pct + '%';
+    document.getElementById('progressBar').style.width = pct + '%';
+
+    // Update step statuses and re-render flowchart
+    const newStatuses = {};
+    steps.forEach(function(s) { newStatuses[s.state_id] = s.status; });
+    window.__STATUSES = newStatuses;
+    renderFlowchart();
+
+  } catch(e) {
+    // Ignore poll errors
+  }
+}
+
+// Poll every 3 seconds
+pollTimer = setInterval(pollProgress, 3000);
+// Also stop polling after 60 minutes as safety
+setTimeout(function() { if (pollTimer) clearInterval(pollTimer); }, 3600000);
+</script>
+{% endif %}
+
+{% if inst.status == 'FAILED' %}
+<script>
+async function resumeInstance() {
+  const btn = document.getElementById('resumeBtn');
+  btn.disabled = true;
+  btn.textContent = 'Resuming...';
+
+  try {
+    const resp = await fetch('/api/instances/{{ inst.instance_id }}/resume', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({max_retries: 3}),
+    });
+
+    if (resp.ok) {
+      location.reload();
+    } else {
+      const err = await resp.json();
+      alert('Resume failed: ' + (err.detail || 'Unknown error'));
+      btn.disabled = false;
+      btn.textContent = '&#8635; Resume';
+    }
+  } catch(e) {
+    alert('Network error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = '&#8635; Resume';
+  }
+}
+</script>
+{% endif %}
+
+{% endblock %}

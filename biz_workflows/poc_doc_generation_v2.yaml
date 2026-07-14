@@ -1,0 +1,228 @@
+workflow_id: poc_doc_generation
+version: "2.1"
+description: "POC 아키텍처 분석 → Dapr 조사 → Markdown 문서 생성"
+
+input_schema:
+  project_root: string
+  description: string
+
+states:
+  - id: START
+    type: start
+
+  # ── Step 1: AI Worker가 file tools로 동적 탐색 (하드코딩 제거) ──
+  - id: ANALYZE_SOURCE
+    type: task
+    task: ai_task
+    timeout_sec: 300
+    description: "파일 시스템 도구로 POC 소스 코드 동적 분석"
+    instruction: >
+      You are a senior software architect analyzing a Python project.
+
+      Use the available file system tools (list_directory, read_file, glob, grep) to explore the project.
+      Do NOT rely on prior knowledge — discover the actual code structure dynamically.
+
+      Start by:
+      1. list_directory(".") to see the top-level project structure
+      2. Identify which directories contain Python code
+      3. For each service directory you find, use list_directory and read the main entry point
+      4. Read key definition files (models, schemas, configs)
+      5. Use grep to find important patterns like "when_all", "publish", "instruction", "register"
+      
+      Explore at least 10-15 files to build a comprehensive understanding.
+      Focus on architecture layers, data flow, Dapr integration, and key patterns.
+
+      Compile and return JSON with:
+      - architecture: object with layers (array), data_flow (string), dapr_integration (object), key_patterns (array)
+      - project_summary: object with total_files (integer), structure_summary (string)
+    inputs: []
+    tools: [read_file, glob, grep, list_directory]
+    output_schema:
+      type: object
+      properties:
+        architecture:
+          type: object
+          properties:
+            layers: {type: array}
+            data_flow: {type: string}
+            dapr_integration: {type: object}
+            key_patterns: {type: array}
+        project_summary:
+          type: object
+          properties:
+            total_files: {type: integer}
+            structure_summary: {type: string}
+
+  # ── Step 2: Dapr 개념 웹 검색 ──
+  - id: RESEARCH_DAPR
+    type: task
+    task: ai_task
+    timeout_sec: 180
+    description: "Dapr 기술 개념 조사"
+    instruction: >
+      You are a Dapr technology specialist.
+
+      Based on the source code analysis from ANALYZE_SOURCE, research the following Dapr concepts
+      that appear in the codebase using web_search. Keep search queries simple and direct:
+
+      1. Dapr Workflow when_all parallel execution
+      2. Dapr pub/sub programmatic subscription
+      3. Dapr sidecar architecture
+      4. Dapr actor state store
+
+      For each concept:
+      - What the Dapr docs say about it
+      - How it's actually used in the POC code
+      - Best practices
+
+      Return JSON with: dapr_concepts (array), summary (string), references (array).
+    inputs: [ANALYZE_SOURCE]
+    tools: [web_search, web_fetch]
+    output_schema:
+      type: object
+      properties:
+        dapr_concepts: {type: array}
+        summary: {type: string}
+        references: {type: array}
+
+  # ── Step 3: Markdown 문서 작성 ──
+  - id: GENERATE_CONTENT
+    type: task
+    task: ai_task
+    timeout_sec: 180
+    description: "분석 결과로 Markdown 문서 작성"
+    instruction: >
+      You are a senior technical writer.
+
+      Combine the ANALYZE_SOURCE (code analysis) and RESEARCH_DAPR (Dapr technology research)
+      into a comprehensive architecture document written in Markdown format.
+
+      Write the document with these sections using proper Markdown headings (#, ##, ###):
+
+      ## 1. Executive Summary
+      ## 2. System Architecture
+      ## 3. Dapr Integration
+      ## 4. Component Details
+      ## 5. Data Flow
+      ## 6. Parallel Execution Model
+      ## 7. Universal AI Worker
+      ## 8. Deployment Architecture
+      ## 9. Testing Strategy
+
+      Each section must have:
+      - A brief introductory paragraph
+      - Bullet points with technical details
+      - Code blocks (```) where relevant for key code snippets
+
+      Return the ENTIRE document as a single Markdown string under a "markdown" key.
+      Also include a "title" key with the document title.
+
+      Return JSON with: title (string), markdown (string, the full MD content).
+    inputs: [ANALYZE_SOURCE, RESEARCH_DAPR]
+    tools: []
+    output_schema:
+      type: object
+      properties:
+        title: {type: string}
+        markdown: {type: string}
+
+  # ── Step 4: 완전한 Markdown 문서 생성 ──
+  - id: GENERATE_MD
+    type: task
+    task: ai_task
+    timeout_sec: 120
+    description: "완전한 Markdown 문서 포맷팅"
+    instruction: >
+      You are a documentation formatter.
+
+      Take the GENERATE_CONTENT output and format it into a polished, complete Markdown document.
+      The document should be self-contained and ready to view.
+
+      Add:
+      - A proper title page section at the top
+      - A table of contents with links to each section
+      - Consistent heading hierarchy
+      - Clean code blocks with language annotations
+      - A "Generated by" footer with timestamp
+
+      Return JSON with: title (string), markdown (string), word_count (integer).
+    inputs: [GENERATE_CONTENT]
+    tools: []
+    output_schema:
+      type: object
+      properties:
+        title: {type: string}
+        markdown: {type: string}
+        word_count: {type: integer}
+
+  # ── Step 5: 검수 ──
+  - id: QUALITY_CHECK
+    type: task
+    task: ai_task
+    timeout_sec: 60
+    description: "Markdown 문서 품질 검수"
+    instruction: >
+      You are a QA reviewer for technical documentation.
+
+      Review the GENERATE_MD Markdown document against these criteria:
+      1. Completeness — all required sections present?
+      2. Technical accuracy — content correctly reflects the actual POC?
+      3. Markdown quality — proper formatting, code blocks, headings?
+      4. Readability — well-structured and clear?
+
+      Return JSON with: scores (object), overall_score (number), issues (array), verdict ("approved" or "needs_revision").
+    inputs: [GENERATE_MD]
+    tools: []
+    output_schema:
+      type: object
+      properties:
+        scores:
+          type: object
+          properties:
+            completeness: {type: integer}
+            accuracy: {type: integer}
+            markdown_quality: {type: integer}
+            readability: {type: integer}
+        overall_score: {type: number}
+        issues: {type: array}
+        verdict: {type: string}
+
+  - id: END
+    type: end
+
+transitions:
+  - from: START
+    to: ANALYZE_SOURCE
+
+  - from: ANALYZE_SOURCE
+    to: RESEARCH_DAPR
+    when: "result.status == 'OK'"
+  - from: ANALYZE_SOURCE
+    to: END
+
+  - from: RESEARCH_DAPR
+    to: GENERATE_CONTENT
+    when: "result.status == 'OK'"
+  - from: RESEARCH_DAPR
+    to: END
+
+  - from: GENERATE_CONTENT
+    to: GENERATE_MD
+    when: "result.status == 'OK'"
+  - from: GENERATE_CONTENT
+    to: END
+
+  - from: GENERATE_MD
+    to: QUALITY_CHECK
+    when: "result.status == 'OK'"
+  - from: GENERATE_MD
+    to: END
+
+  - from: QUALITY_CHECK
+    to: END
+    when: "result.status == 'OK' and result.verdict == 'approved'"
+  - from: QUALITY_CHECK
+    to: GENERATE_CONTENT
+    when: "result.status == 'OK' and result.verdict == 'needs_revision'"
+  - from: QUALITY_CHECK
+    to: END

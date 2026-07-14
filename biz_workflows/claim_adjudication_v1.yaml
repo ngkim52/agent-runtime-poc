@@ -1,0 +1,107 @@
+workflow_id: claim_adjudication
+version: "1.0"
+description: "보험금 청구 이미지 기반 자동 심사 파이프라인 (POC) — Dapr when_all fan-out/fan-in"
+
+states:
+  - id: START
+    type: start
+
+  - id: DOWNLOAD_IMAGES
+    type: task
+    task: image_download
+    timeout_sec: 60
+    description: "이미지 시스템에서 해당 접수번호의 모든 이미지 다운로드"
+    inputs: []
+
+  - id: CLASSIFY_DOCS
+    type: task
+    task: document_classification
+    timeout_sec: 120
+    description: "다운로드된 이미지 문서 종류 분류"
+    inputs: [DOWNLOAD_IMAGES]
+
+  - id: EXTRACT_DATA
+    type: task
+    task: image_data_extraction
+    timeout_sec: 180
+    description: "이미지에서 구조화 데이터(피보험자/계좌 등) 추출"
+    inputs: [CLASSIFY_DOCS]
+
+  - id: PARALLEL_CHECKS
+    type: parallel
+    description: "본인확인 + 사고정보추출을 Dapr when_all로 병렬 실행"
+    branches:
+      - id: VERIFY_IDENTITY
+        task: identity_verification
+        inputs: [EXTRACT_DATA]
+      - id: EXTRACT_ACCIDENT_INFO
+        task: accident_info_extraction
+        inputs: [CLASSIFY_DOCS]
+
+  - id: MATCH_PRIOR_CLAIMS
+    type: task
+    task: prior_claims_matching
+    timeout_sec: 30
+    description: "처리계 기지급 전문 조회 후 동일사고 판정 및 확정"
+    inputs: [EXTRACT_ACCIDENT_INFO]
+
+  - id: MANUAL_REVIEW
+    type: task
+    task: route_to_human
+    timeout_sec: 10
+    description: "수기 심사 큐로 이관"
+    inputs: []
+
+  - id: END
+    type: end
+
+transitions:
+  # 시작
+  - from: START
+    to: DOWNLOAD_IMAGES
+
+  # 1) 이미지 다운로드
+  - from: DOWNLOAD_IMAGES
+    to: CLASSIFY_DOCS
+    when: "result.status == 'OK' and result.image_count > 0"
+  - from: DOWNLOAD_IMAGES
+    to: MANUAL_REVIEW
+
+  # 2) 문서 분류
+  - from: CLASSIFY_DOCS
+    to: EXTRACT_DATA
+    when: "result.status == 'OK' and result.has_claim_form == True"
+  - from: CLASSIFY_DOCS
+    to: MANUAL_REVIEW
+
+  # 3) 데이터 추출 → 병렬 진입
+  - from: EXTRACT_DATA
+    to: PARALLEL_CHECKS
+    when: "result.status == 'OK' and result.extraction_confidence >= 0.7"
+  - from: EXTRACT_DATA
+    to: MANUAL_REVIEW
+
+  # 4) 병렬 결과 → 모든 브랜치 OK면 계속, 아니면 수기
+  - from: PARALLEL_CHECKS
+    to: MATCH_PRIOR_CLAIMS
+    when: "result.VERIFY_IDENTITY.status == 'OK' and result.EXTRACT_ACCIDENT_INFO.status == 'OK'"
+  - from: PARALLEL_CHECKS
+    to: MANUAL_REVIEW
+
+  # 5) 기지급 전문 조회 + 확정
+  - from: MATCH_PRIOR_CLAIMS
+    to: END
+    when: "result.status == 'OK' and result.accident_confirmed == True"
+  - from: MATCH_PRIOR_CLAIMS
+    to: MANUAL_REVIEW
+
+  # 수기 심사 후 종료
+  - from: MANUAL_REVIEW
+    to: END
+
+input_schema:
+  claim_no: string
+  policy_no: string
+  insured_name: string
+  insured_ssn: string
+  account_no: string

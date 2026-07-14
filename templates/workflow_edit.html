@@ -1,0 +1,389 @@
+{% extends "base.html" %}
+{% block title %}{% if is_new %}New Workflow{% else %}Edit {{ wf.workflow_id }}{% endif %}{% endblock %}
+{% block content %}
+<style>
+.toast { position:fixed; top:1rem; right:1rem; z-index:9999; padding:0.75rem 1.5rem; border-radius:0.5rem; color:#fff; font-size:0.875rem; transition:opacity 0.3s; }
+.toast-success { background:#059669; }
+.toast-error { background:#dc2626; }
+.section-card { background:#fff; border-radius:0.5rem; box-shadow:0 1px 3px rgba(0,0,0,0.1); padding:1rem; margin-bottom:1rem; }
+</style>
+
+<div class="mb-4 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <a href="/workflows" class="text-blue-600 hover:underline text-sm">&larr; Workflows</a>
+    {% if not is_new %}
+    <a href="/workflows/{{ wf.workflow_id }}/{{ wf.version }}" class="text-blue-600 hover:underline text-sm">&larr; View</a>
+    {% endif %}
+  </div>
+  <button onclick="saveWorkflow()" id="saveBtn" class="bg-blue-600 text-white px-6 py-2 rounded text-sm hover:bg-blue-700 font-medium flex items-center gap-2">
+    <span id="saveIcon">&#128190;</span> <span id="saveLabel">Save</span>
+  </button>
+</div>
+
+<script>
+const STATE_TYPES = ['start', 'task', 'parallel', 'end'];
+const TASK_TYPES = [
+  'ai_task',
+  'image_download', 'document_classification', 'image_data_extraction',
+  'identity_verification', 'accident_info_extraction', 'prior_claims_matching', 'route_to_human'
+];
+
+let wfData = {{ wf_dict | tojson }};
+let workflowId = wfData.workflow_id;
+let version = wfData.version;
+let states = wfData.states || [];
+let transitions = (wfData.transitions || []).map(t => ({
+  from_: t.from, to: t.to, when: t.when
+}));
+let description = wfData.description || '';
+let isNew = {{ 'true' if is_new else 'false' }};
+
+function toast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2500);
+}
+
+function uid() { return 's_' + Date.now() + '_' + Math.random().toString(36).slice(2,6); }
+
+function typeBadge(t) {
+  const m = {start:'bg-emerald-100 text-emerald-700',task:'bg-blue-100 text-blue-700',parallel:'bg-purple-100 text-purple-700',end:'bg-gray-100 text-gray-500'};
+  return `<span class="inline-block text-xs px-2 py-0.5 rounded font-medium ${m[t]||'bg-gray-100'}">${t}</span>`;
+}
+
+function stateOptions(sel, fromOnly) {
+  let filtered = states;
+  if (fromOnly) filtered = states.filter(s => s.type !== 'end');
+  return '<option value="">-- select --</option>' +
+    filtered.map(s => `<option value="${s.id}" ${s.id===sel?'selected':''}>${s.id} (${s.type})</option>`).join('');
+}
+
+function render() {
+  document.getElementById('descInput').value = description;
+  renderStates();
+  renderTransitions();
+}
+
+/* ── States ── */
+function renderStates() {
+  const el = document.getElementById('stateList');
+  el.innerHTML = states.map((s, i) => {
+    const isTask = s.type === 'task';
+    const isPar = s.type === 'parallel';
+    return `<div class="border rounded-lg p-4 mb-3 hover:shadow-sm transition" data-idx="${i}">
+      <div class="flex items-start justify-between mb-3">
+        <div class="flex items-center gap-2 flex-1">
+          <span class="text-xs text-gray-400 font-mono w-6">#${i+1}</span>
+          <input class="border rounded px-3 py-1.5 text-sm font-mono w-48" value="${escHtml(s.id)}"
+                 onchange="states[${i}].id=this.value.trim(); renderTransitions()" placeholder="STATE_ID">
+          <select class="border rounded px-2 py-1.5 text-sm" onchange="states[${i}].type=this.value; if(this.value==='start'){states[${i}].id='START';} renderStates()">
+            ${STATE_TYPES.map(t => `<option value="${t}" ${t===s.type?'selected':''}>${t}</option>`).join('')}
+          </select>
+          ${typeBadge(s.type)}
+        </div>
+        <button onclick="if(confirm('Delete state \\''+states[${i}].id+'\\'?'))deleteState(${i})" class="text-red-400 hover:text-red-600 text-lg leading-none ml-2">&times;</button>
+      </div>
+      <div class="grid grid-cols-[1fr_120px] gap-3 mb-2">
+        <input class="border rounded px-3 py-1.5 text-xs text-gray-600" value="${escHtml(s.description||'')}"
+               onchange="states[${i}].description=this.value" placeholder="Description (optional)">
+        <select class="border rounded px-2 py-1.5 text-xs ${isTask?'':'bg-gray-50 text-gray-400'}" 
+                onchange="states[${i}].task=this.value" ${isTask?'':'disabled'}>
+          <option value="">-- task type --</option>
+          ${TASK_TYPES.map(t => `<option value="${t}" ${t===s.task?'selected':''}>${t}</option>`).join('')}
+        </select>
+      </div>
+      <div class="grid grid-cols-[1fr_100px] gap-3 mb-1">
+        <span></span>
+<input class="border rounded px-2 py-1 text-xs text-gray-400" type="number" min="5" max="3600"
+       value="${s.timeout_sec||60}"
+       onchange="states[${i}].timeout_sec=parseInt(this.value)||60" title="Timeout (sec)">
+      </div>
+      ${isPar ? renderBranches(s, i) : ''}
+      ${renderAdvanced(s, i)}
+    </div>`;
+  }).join('');
+}
+
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escJson(v) { return v ? escHtml(JSON.stringify(v, null, 2)) : ''; }
+
+function renderAdvanced(s, i) {
+  return `<details class="mt-2">
+    <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">&#9881; Advanced</summary>
+    <div class="mt-2 space-y-2 p-2 bg-gray-50 rounded border">
+      <div>
+        <label class="text-xs text-gray-500 font-medium">Instruction (AI prompt)</label>
+        <textarea rows="3" class="w-full border rounded px-2 py-1 text-xs font-mono mt-1"
+          onchange="states[${i}].instruction=this.value" placeholder="You are a specialist...">${escHtml(s.instruction||'')}</textarea>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="text-xs text-gray-500 font-medium">Inputs (from previous steps)</label>
+          <input class="w-full border rounded px-2 py-1 text-xs mt-1" value="${escHtml((s.inputs||[]).join(', '))}"
+                 onchange="states[${i}].inputs=this.value.split(',').map(x=>x.trim()).filter(Boolean)"
+                 placeholder="STATE_ID_1, STATE_ID_2">
+        </div>
+        <div>
+          <label class="text-xs text-gray-500 font-medium">Tools</label>
+          <input class="w-full border rounded px-2 py-1 text-xs mt-1" value="${escHtml((s.tools||[]).join(', '))}"
+                 onchange="states[${i}].tools=this.value.split(',').map(x=>x.trim()).filter(Boolean)"
+                 placeholder="web_search, web_fetch">
+        </div>
+      </div>
+      <div>
+        <label class="text-xs text-gray-500 font-medium">Output Schema (JSON)</label>
+        <textarea rows="2" class="w-full border rounded px-2 py-1 text-xs font-mono mt-1"
+          onchange="try{states[${i}].output_schema=JSON.parse(this.value)}catch(e){}"
+          placeholder='{"type":"object","properties":{...}}'>${escJson(s.output_schema)}</textarea>
+      </div>
+    </div>
+  </details>`;
+}
+
+function renderBranches(s, i) {
+  const bs = s.branches || [];
+  let h = `<div class="ml-6 mt-2 p-3 bg-purple-50 rounded-lg border border-purple-100">
+    <div class="text-xs font-semibold text-purple-700 mb-2">&#9881; Branches</div>`;
+  bs.forEach((b, bi) => {
+    h += `<div class="border border-purple-100 rounded-lg p-3 mb-2 bg-white">
+      <div class="flex items-center gap-2 mb-1.5">
+        <input class="border rounded px-2 py-1 text-xs w-24" value="${escHtml(b.id)}"
+               onchange="states[${i}].branches[${bi}].id=this.value.trim()" placeholder="BRANCH_ID">
+        <span class="text-gray-400 text-xs">&rarr;</span>
+        <select class="border rounded px-2 py-1 text-xs flex-1" onchange="states[${i}].branches[${bi}].task=this.value">
+          <option value="">-- task --</option>
+          ${TASK_TYPES.map(t => `<option value="${t}" ${t===b.task?'selected':''}>${t}</option>`).join('')}
+        </select>
+        <input class="border rounded px-2 py-1 text-xs w-16 text-center text-gray-400"
+               type="number" min="5" max="3600"
+               value="${b.timeout_sec||60}"
+               onchange="states[${i}].branches[${bi}].timeout_sec=parseInt(this.value)||60"
+               title="Timeout (sec)">
+        <button onclick="states[${i}].branches.splice(${bi},1);renderStates()" class="text-red-400 hover:text-red-600 text-sm leading-none">&times;</button>
+      </div>
+      <div class="mb-1.5">
+        <textarea rows="2" class="w-full border rounded px-2 py-1 text-xs font-mono"
+          onchange="states[${i}].branches[${bi}].instruction=this.value" placeholder="Branch instruction (AI prompt)">${escHtml(b.instruction||'')}</textarea>
+      </div>
+      <details class="mt-1">
+        <summary class="text-xs text-gray-400 cursor-pointer hover:text-gray-600">&#9881; Advanced</summary>
+        <div class="mt-1.5 space-y-1.5 p-2 bg-purple-50 rounded border border-purple-100">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-xs text-gray-500 font-medium">Inputs</label>
+              <input class="w-full border rounded px-2 py-1 text-xs mt-0.5" value="${escHtml((b.inputs||[]).join(', '))}"
+                     onchange="states[${i}].branches[${bi}].inputs=this.value.split(',').map(x=>x.trim()).filter(Boolean)"
+                     placeholder="_input, STATE_ID">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500 font-medium">Tools</label>
+              <input class="w-full border rounded px-2 py-1 text-xs mt-0.5" value="${escHtml((b.tools||[]).join(', '))}"
+                     onchange="states[${i}].branches[${bi}].tools=this.value.split(',').map(x=>x.trim()).filter(Boolean)"
+                     placeholder="web_search, read_file">
+            </div>
+          </div>
+          <div>
+            <label class="text-xs text-gray-500 font-medium">Output Schema (JSON)</label>
+            <textarea rows="2" class="w-full border rounded px-2 py-1 text-xs font-mono mt-0.5"
+              onchange="try{states[${i}].branches[${bi}].output_schema=JSON.parse(this.value)}catch(e){}"
+              placeholder='{"type":"object","properties":{...}}'>${escJson(b.output_schema)}</textarea>
+          </div>
+        </div>
+      </details>
+    </div>`;
+  });
+  h += `<button onclick="(states[${i}].branches=states[${i}].branches||[]).push({id:'NEW_BRANCH',task:'',instruction:'',inputs:[],tools:[],output_schema:null,timeout_sec:60});renderStates()" class="text-purple-600 text-xs hover:underline mt-1">+ Add branch</button>`;
+  h += `</div>`;
+  return h;
+}
+
+function addState() {
+  const isFirst = states.length === 0;
+  states.push({id: isFirst ? 'START' : 'NEW_STATE', type: isFirst ? 'start' : 'task', task: isFirst ? null : '', branches: [], description: '', timeout_sec: 60});
+  render();
+}
+function deleteState(i) {
+  const sid = states[i].id;
+  states.splice(i,1);
+  transitions = transitions.filter(t => t.from_!==sid && t.to!==sid);
+  render();
+}
+
+/* ── Transitions ── */
+function renderTransitions() {
+  const el = document.getElementById('transitionList');
+  if (!states.length) {
+    el.innerHTML = '<p class="text-gray-400 text-sm text-center py-4">Add states first</p>';
+    return;
+  }
+  el.innerHTML = transitions.map((t,i) => `<div class="border rounded-lg p-4 mb-2 hover:shadow-sm transition">
+    <div class="flex items-center gap-2 mb-2">
+      <select class="border rounded px-3 py-1.5 text-sm font-mono flex-1" onchange="transitions[${i}].from_=this.value">
+        ${stateOptions(t.from_, true)}
+      </select>
+      <span class="text-gray-300 text-lg">&rarr;</span>
+      <select class="border rounded px-3 py-1.5 text-sm font-mono flex-1" onchange="transitions[${i}].to=this.value">
+        ${stateOptions(t.to)}
+      </select>
+      <button onclick="if(confirm('Delete this transition?'))deleteTransition(${i})" class="text-red-400 hover:text-red-600 text-lg leading-none ml-2">&times;</button>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <span class="text-gray-400 font-mono">when:</span>
+      <input class="border rounded px-2 py-1 text-xs font-mono flex-1 bg-gray-50" value="${escHtml(t.when||'')}"
+             onchange="transitions[${i}].when=this.value||null" placeholder="result.status == 'OK' and result.image_count > 0">
+      <span class="text-gray-400">(empty = unconditional)</span>
+    </div>
+    ${t.from_===t.to ? '<div class="mt-1 text-xs text-amber-600">&#9888; from/to are the same state</div>' : ''}
+  </div>`).join('');
+}
+
+function addTransition() {
+  const avail = states.filter(s => s.type!=='end');
+  if (!avail.length) { toast('Add at least one non-end state first','error'); return; }
+  const pick = avail[0].id;
+  transitions.push({from_:pick, to:pick, when:null});
+  render();
+}
+function deleteTransition(i) { transitions.splice(i,1); render(); }
+
+/* ── Validation & Save ── */
+function validate() {
+  const ids = states.map(s => s.id.trim());
+  for (let i=0; i<ids.length; i++) {
+    if (!ids[i]) { toast('State #'+(i+1)+' has empty ID','error'); return false; }
+    if (ids.indexOf(ids[i]) !== i) { toast('Duplicate state ID: '+ids[i],'error'); return false; }
+  }
+  for (const t of transitions) {
+    if (!t.from_ || !t.to) { toast('Transition has empty from/to state','error'); return false; }
+  }
+  const starts = states.filter(s => s.type==='start');
+  if (!starts.length) { toast('Need at least one start state','error'); return false; }
+  if (starts.length > 1) { toast('Only one start state allowed','error'); return false; }
+  return true;
+}
+
+async function saveWorkflow() {
+  if (!validate()) return;
+
+  description = document.getElementById('descInput').value;
+  if (isNew) {
+    workflowId = document.getElementById('wfIdInput').value.trim() || workflowId;
+    version = document.getElementById('wfVerInput').value.trim() || version;
+    if (!workflowId || workflowId==='new_workflow') {
+      const wfInput = document.getElementById('wfIdInput');
+      if (wfInput) { wfInput.focus(); wfInput.style.borderColor = '#dc2626'; wfInput.style.borderWidth = '2px'; }
+      toast('Change the workflow ID from "' + workflowId + '" to a unique name', 'error');
+      return;
+    }
+  }
+
+  const body = {
+    input_schema: wfData.input_schema || {},
+    description: description,
+    states: states.map(s => ({
+      id: s.id.trim(),
+      type: s.type,
+      task: s.type==='task' ? (s.task||null) : null,
+      branches: s.type==='parallel' ? (s.branches||[]).map(b => ({
+        id: b.id.trim(), task: b.task,
+        timeout_sec: parseInt(b.timeout_sec) || 60,
+        instruction: b.instruction || null,
+        inputs: b.inputs || [],
+        tools: b.tools || [],
+        input_schema: b.input_schema || null,
+        output_schema: b.output_schema || null,
+        max_tokens: b.max_tokens || null,
+      })) : [],
+      description: s.description || null,
+      timeout_sec: s.timeout_sec || 60,
+      instruction: s.instruction || null,
+      inputs: s.inputs || [],
+      tools: s.tools || [],
+      input_schema: s.input_schema || null,
+      output_schema: s.output_schema || null,
+      max_tokens: s.max_tokens || null,
+    })),
+    transitions: transitions.map(t => ({from: t.from_, to: t.to, when: t.when||null})),
+  };
+
+  const btn = document.getElementById('saveBtn');
+  const icon = document.getElementById('saveIcon');
+  const lbl = document.getElementById('saveLabel');
+  btn.classList.add('opacity-60', 'pointer-events-none');
+  icon.textContent = '&#8987;'; lbl.textContent = 'Saving...';
+
+  try {
+    const resp = await fetch('/api/workflows/'+encodeURIComponent(workflowId)+'/'+encodeURIComponent(version), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.text();
+      toast('Save failed: '+err, 'error');
+      return;
+    }
+    toast('Saved successfully!', 'success');
+    setTimeout(() => { window.location.href = '/workflows/'+encodeURIComponent(workflowId)+'/'+encodeURIComponent(version); }, 600);
+  } catch(e) {
+    toast('Error: '+e.message, 'error');
+  } finally {
+    icon.textContent = '&#128190;'; lbl.textContent = 'Save';
+    btn.classList.remove('opacity-60', 'pointer-events-none');
+  }
+}
+</script>
+
+<!-- Meta -->
+<div class="section-card">
+  {% if is_new %}
+  <div class="mb-3">
+    <label for="wfIdInput" class="block text-sm font-medium text-gray-700 mb-1">Workflow ID</label>
+    <div class="flex items-center gap-3">
+      <input id="wfIdInput" value="{{ wf.workflow_id }}" class="border rounded px-3 py-2 font-mono text-lg font-bold flex-1" placeholder="my_workflow_name">
+      <input id="wfVerInput" value="{{ wf.version }}" class="border rounded px-3 py-2 font-mono text-sm w-24 text-center" placeholder="1.0">
+    </div>
+    <p class="text-xs text-amber-600 mt-1">&#9888; Change "{{ wf.workflow_id }}" to your workflow name</p>
+  </div>
+  {% else %}
+  <div class="flex items-center gap-3 mb-3">
+    <h1 class="text-xl font-bold text-gray-800">{{ wf.workflow_id }}</h1>
+    <span class="text-gray-400 text-sm bg-gray-100 px-2 py-0.5 rounded">v{{ wf.version }}</span>
+  </div>
+  {% endif %}
+  <div>
+    <label for="descInput" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+    <input id="descInput" class="w-full border rounded px-3 py-2 text-sm" placeholder="Workflow description">
+  </div>
+</div>
+
+<!-- Stats bar -->
+<div class="grid grid-cols-2 gap-4 mb-4 text-sm">
+  <div class="section-card text-center"><span class="text-gray-500">States</span><br><span class="text-2xl font-bold text-blue-700" id="stateCount">{{ wf.states|length }}</span></div>
+  <div class="section-card text-center"><span class="text-gray-500">Transitions</span><br><span class="text-2xl font-bold text-purple-700" id="transCount">{{ wf.transitions|length }}</span></div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+  <!-- States -->
+  <div class="section-card">
+    <div class="flex justify-between items-center mb-4 pb-2 border-b">
+      <h2 class="text-base font-bold text-gray-800">&#9881; States</h2>
+      <button onclick="addState()" class="bg-blue-100 text-blue-700 px-3 py-1.5 rounded text-xs hover:bg-blue-200 font-medium">+ Add State</button>
+    </div>
+    <div id="stateList" class="space-y-1"></div>
+  </div>
+
+  <!-- Transitions -->
+  <div class="section-card">
+    <div class="flex justify-between items-center mb-4 pb-2 border-b">
+      <h2 class="text-base font-bold text-gray-800">&#8594; Transitions</h2>
+      <button onclick="addTransition()" class="bg-purple-100 text-purple-700 px-3 py-1.5 rounded text-xs hover:bg-purple-200 font-medium">+ Add Transition</button>
+    </div>
+    <div id="transitionList"></div>
+  </div>
+</div>
+
+<script>render();</script>
+{% endblock %}

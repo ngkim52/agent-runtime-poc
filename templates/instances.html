@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}Instances{% endblock %}
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold text-gray-800">Execution Instances</h1>
+  <a href="/run"
+    class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold px-4 py-2 rounded-lg transition-colors">
+    + New Run
+  </a>
+</div>
+
+<!-- Status Filter Tabs -->
+<div class="flex gap-1 mb-6 bg-gray-100 rounded-lg p-1 w-fit">
+  <a href="/instances"
+    class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors
+    {% if not status_filter %}bg-white text-gray-800 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">All</a>
+  <a href="/instances?status=RUNNING"
+    class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors
+    {% if status_filter == 'RUNNING' %}bg-white text-blue-700 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">Running</a>
+  <a href="/instances?status=COMPLETED"
+    class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors
+    {% if status_filter == 'COMPLETED' %}bg-white text-green-700 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">Completed</a>
+  <a href="/instances?status=FAILED"
+    class="px-4 py-1.5 rounded-md text-sm font-medium transition-colors
+    {% if status_filter == 'FAILED' %}bg-white text-red-700 shadow-sm{% else %}text-gray-500 hover:text-gray-700{% endif %}">Failed</a>
+</div>
+
+{% if instances %}
+<div class="grid gap-4 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+  {% for inst in instances %}
+  <div class="bg-white rounded-xl shadow-sm border border-gray-100 hover:shadow-md hover:border-gray-200 transition-all group">
+    <!-- Header with status badge -->
+    <div class="px-4 pt-4 pb-2 flex items-start justify-between">
+      <div class="min-w-0 flex-1 mr-2">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="font-semibold text-sm text-gray-900 truncate">{{ inst.workflow_id }}</span>
+          <span class="text-xs text-gray-400 shrink-0">v{{ inst.workflow_version }}</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="inline-block w-2 h-2 rounded-full
+            {% if inst.status == 'COMPLETED' %}bg-green-500
+            {% elif inst.status == 'RUNNING' %}bg-blue-500 animate-pulse
+            {% else %}bg-red-500{% endif %}"></span>
+          <span class="text-xs font-medium
+            {% if inst.status == 'COMPLETED' %}text-green-600
+            {% elif inst.status == 'RUNNING' %}text-blue-600
+            {% else %}text-red-600{% endif %}">{{ inst.status }}</span>
+        </div>
+      </div>
+      <span class="text-xs font-mono text-gray-400 truncate max-w-[140px]" title="{{ inst.instance_id }}">{{ inst.instance_id[:20] }}&hellip;</span>
+    </div>
+
+    <!-- Progress bar (COMPLETED=full, RUNNING=partial, FAILED=partial+red) -->
+    {% set total_steps = inst.step_count %}
+    {% set ok_steps = inst.ok_count if inst.ok_count is defined else 0 %}
+    <div class="px-4 pb-1">
+      <div class="w-full bg-gray-100 rounded-full h-1.5">
+        <div class="h-1.5 rounded-full transition-all duration-500
+          {% if inst.status == 'COMPLETED' %}bg-green-500 w-full
+          {% elif inst.status == 'FAILED' %}bg-red-400
+          {% else %}bg-blue-500{% endif %}"
+          style="width: {% if inst.status == 'COMPLETED' %}100{% elif inst.status == 'FAILED' %}{{ (ok_steps / total_steps * 100) if total_steps > 0 else 25 }}{% else %}40{% endif %}%"></div>
+      </div>
+    </div>
+
+    <!-- Info rows -->
+    <div class="px-4 pb-3 pt-2 space-y-1">
+      <div class="flex items-center justify-between text-xs text-gray-500">
+        <span>Current State</span>
+        <span class="font-mono font-medium text-gray-700">{{ inst.current_state }}</span>
+      </div>
+      <div class="flex items-center justify-between text-xs text-gray-500">
+        <span>Steps</span>
+        <span class="font-mono font-medium text-gray-700">{{ ok_steps }}/{{ total_steps }}</span>
+      </div>
+      <div class="flex items-center justify-between text-xs text-gray-500">
+        <span>Started</span>
+        <span class="text-gray-600">{{ inst.created_at[:10] }} {{ inst.created_at[11:19] }}</span>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="px-4 py-3 bg-gray-50 rounded-b-xl border-t border-gray-100 flex items-center gap-2">
+      <a href="/instances/{{ inst.instance_id }}"
+        class="text-xs text-blue-600 hover:text-blue-800 font-medium transition-colors">Details</a>
+      <span class="text-gray-300">|</span>
+      <a href="/instances/{{ inst.instance_id }}/progress"
+        class="text-xs text-blue-600 hover:text-blue-800 font-medium transition-colors">
+        {% if inst.status == 'RUNNING' %}Live Progress{% else %}Timeline{% endif %} &rarr;
+      </a>
+      {% if inst.status == 'COMPLETED' %}
+      <span class="text-gray-300">|</span>
+      <a href="/instances/{{ inst.instance_id }}/output"
+        class="text-xs text-green-600 hover:text-green-800 font-medium transition-colors">View Output</a>
+      {% endif %}
+      <div class="ml-auto">
+        {% if inst.status == 'FAILED' %}
+        <button onclick="resumeInstance('{{ inst.instance_id }}', this)"
+          class="bg-amber-500 hover:bg-amber-600 text-white text-xs px-3 py-1 rounded-md font-medium transition-colors">
+          &#8635; Retry
+        </button>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="bg-white rounded-xl shadow-sm border border-gray-100 p-16 text-center">
+  <div class="text-4xl text-gray-300 mb-4">&#9632;</div>
+  <p class="text-gray-500 text-lg mb-1">No instances found</p>
+  {% if status_filter %}
+  <p class="text-gray-400 text-sm mb-4">No <strong>{{ status_filter }}</strong> instances</p>
+  {% else %}
+  <p class="text-gray-400 text-sm mb-4">Run a workflow to see execution history</p>
+  {% endif %}
+  <a href="/run"
+    class="inline-block bg-blue-600 hover:bg-blue-700 text-white text-sm font-bold px-5 py-2 rounded-lg transition-colors">
+    &#9654; Run a Workflow
+  </a>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function resumeInstance(instanceId, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Resuming...';
+  btn.classList.remove('bg-amber-500', 'hover:bg-amber-600');
+  btn.classList.add('bg-gray-400');
+  try {
+    const resp = await fetch('/api/instances/' + instanceId + '/resume', { method: 'POST' });
+    if (resp.ok) {
+      window.location.href = '/instances/' + instanceId + '/progress';
+    } else {
+      const err = await resp.json();
+      alert('Resume failed: ' + (err.detail || resp.statusText));
+      btn.disabled = false;
+      btn.innerHTML = '&#8635; Retry';
+      btn.classList.remove('bg-gray-400');
+      btn.classList.add('bg-amber-500', 'hover:bg-amber-600');
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+    btn.disabled = false;
+    btn.innerHTML = '&#8635; Retry';
+    btn.classList.remove('bg-gray-400');
+    btn.classList.add('bg-amber-500', 'hover:bg-amber-600');
+  }
+}
+</script>
+{% endblock %}

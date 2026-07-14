@@ -1,0 +1,247 @@
+# ────────────────────────────────────────────────────────────
+# Agent Platform POC
+# Architecture: Orchestrator → Dapr Workflow → Pub/Sub → Workers
+#
+#   docker compose build
+#   docker compose up -d
+#   curl -X POST http://localhost:8000/claims/start -H "Content-Type: application/json" -d "{...}"
+# ────────────────────────────────────────────────────────────
+
+x-agent-worker: &agent_worker_base
+  build: .
+  command: uvicorn agent_worker.main:app --host 0.0.0.0 --port 8001 --log-level info
+  environment: &agent_worker_env
+    APP_PORT: "8001"
+    DAPR_HTTP_PORT: "3500"
+    DAPR_GRPC_PORT: "50001"
+    DAPR_PUBSUB_NAME: "pubsub"
+    AGENT_TASK_TOPIC: "agent.tasks"
+    AGENT_RESULT_TOPIC: "agent.results"
+    DATABASE_URL: "${DATABASE_URL:-postgresql://postgres:changeme@postgres:5432/poc_workflow}"
+    OPENAI_API_KEY: "${OPENAI_API_KEY:-sk-placeholder}"
+    LLM_BASE_URL: "${LLM_BASE_URL:-https://api.openai.com/v1}"
+    LLM_MODEL: "${LLM_MODEL:-gpt-4o}"
+    TAVILY_API_KEY: "${TAVILY_API_KEY:-tvyl-placeholder}"
+    FS_BASE_PATH: "/app"
+    LLM_TIMEOUT: "${LLM_TIMEOUT:-180}"
+  restart: unless-stopped
+
+x-agent-worker-dapr: &agent_worker_dapr_base
+  image: "daprio/daprd:1.18.0"
+  volumes:
+    - "./components:/components"
+  depends_on:
+    - placement
+    - scheduler
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
+      POSTGRES_DB: "${POSTGRES_DB:-poc_workflow}"
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # ── 인프라 ──────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    # ports 미노출: 기존 dapr_redis(6379)와 충돌 방지. 내부 네트워크 접근 redis:6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.17
+    command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://etcd:2379
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  # ── Dapr Scheduler Service (v1.18+ 필수) ──────────────
+  scheduler:
+    image: "daprio/dapr:1.18.0"
+    command: ["./scheduler", "--etcd-embed=false", "--etcd-client-endpoints", "etcd:2379", "--port", "50006", "--workers", "8"]
+    ports:
+      - "50006:50006"
+    depends_on:
+      etcd:
+        condition: service_healthy
+
+  # ── Dapr Placement Service ────────────────────────────
+  placement:
+    image: "daprio/dapr:1.18.0"
+    command: ["./placement", "--port", "50005"]
+    ports:
+      - "50005:50005"
+
+  # ── 1) Orchestrator ─────────────────────────────────────
+  orchestrator:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      APP_PORT: "8000"
+      DAPR_WF_SERVICE_URL: "http://dapr_workflow:8002"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://postgres:changeme@postgres:5432/poc_workflow}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-sk-placeholder}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-https://api.openai.com/v1}"
+      LLM_MODEL: "${LLM_MODEL:-gpt-4o}"
+      LLM_TIMEOUT: "${LLM_TIMEOUT:-180}"
+      AGENT_TIMEOUT: "${AGENT_TIMEOUT:-120}"
+    command: uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000 --log-level info
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      placement:
+        condition: service_started
+    restart: unless-stopped
+
+  orchestrator-dapr:
+    image: "daprio/daprd:1.18.0"
+    command: [
+      "./daprd",
+      "--app-id", "orchestrator",
+      "--app-port", "8000",
+      "--dapr-http-port", "3500",
+      "--dapr-grpc-port", "50001",
+      "--placement-host-address", "placement:50005",
+      "--scheduler-host-address", "scheduler:50006",
+      "--resources-path", "/components",
+    ]
+    volumes:
+      - "./components:/components"
+    depends_on:
+      orchestrator: { condition: service_started }
+      placement: { condition: service_started }
+      scheduler: { condition: service_started }
+      rabbitmq: { condition: service_healthy }
+    network_mode: "service:orchestrator"
+
+  # ── 2) Dapr Workflow Layer ──────────────────────────────
+  dapr_workflow:
+    build: .
+    ports:
+      - "8002:8002"
+    environment:
+      APP_PORT: "8002"
+      DAPR_HTTP_PORT: "3500"
+      DAPR_GRPC_PORT: "50001"
+      DAPR_PUBSUB_NAME: "pubsub"
+      AGENT_TASK_TOPIC: "agent.tasks"
+      AGENT_RESULT_TOPIC: "agent.results"
+    command: uvicorn dapr_workflow.main:app --host 0.0.0.0 --port 8002 --log-level info
+    depends_on:
+      redis: { condition: service_healthy }
+      placement:
+        condition: service_started
+    restart: unless-stopped
+
+  dapr_workflow-dapr:
+    image: "daprio/daprd:1.18.0"
+    command: [
+      "./daprd",
+      "--app-id", "dapr_workflow",
+      "--app-port", "8002",
+      "--dapr-http-port", "3500",
+      "--dapr-grpc-port", "50001",
+      "--placement-host-address", "placement:50005",
+      "--scheduler-host-address", "scheduler:50006",
+      "--resources-path", "/components",
+    ]
+    volumes:
+      - "./components:/components"
+    depends_on:
+      dapr_workflow: { condition: service_started }
+      placement: { condition: service_started }
+      scheduler: { condition: service_started }
+      rabbitmq: { condition: service_healthy }
+    network_mode: "service:dapr_workflow"
+
+  # ── RabbitMQ (competing consumers for multi-worker) ──
+  rabbitmq:
+    image: rabbitmq:3-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── 3) Agent Workers (multi-worker via competing consumers) ──
+  agent_worker-1:
+    <<: *agent_worker_base
+    ports:
+      - "8003:8001"
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      placement: { condition: service_started }
+
+  agent_worker-1-dapr:
+    <<: *agent_worker_dapr_base
+    command: [
+      "./daprd",
+      "--app-id", "agent_worker",
+      "--app-port", "8001",
+      "--dapr-http-port", "3500",
+      "--dapr-grpc-port", "50001",
+      "--placement-host-address", "placement:50005",
+      "--scheduler-host-address", "scheduler:50006",
+      "--resources-path", "/components",
+    ]
+    network_mode: "service:agent_worker-1"
+    depends_on:
+      agent_worker-1: { condition: service_started }
+      placement: { condition: service_started }
+      scheduler: { condition: service_started }
+      rabbitmq: { condition: service_healthy }
+
+  agent_worker-2:
+    <<: *agent_worker_base
+    ports:
+      - "8004:8001"
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      placement: { condition: service_started }
+
+  agent_worker-2-dapr:
+    <<: *agent_worker_dapr_base
+    command: [
+      "./daprd",
+      "--app-id", "agent_worker",
+      "--app-port", "8001",
+      "--dapr-http-port", "3500",
+      "--dapr-grpc-port", "50001",
+      "--placement-host-address", "placement:50005",
+      "--scheduler-host-address", "scheduler:50006",
+      "--resources-path", "/components",
+    ]
+    network_mode: "service:agent_worker-2"
+    depends_on:
+      agent_worker-2: { condition: service_started }
+      placement: { condition: service_started }
+      scheduler: { condition: service_started }
+      rabbitmq: { condition: service_healthy }
+
+volumes:
+  pgdata:

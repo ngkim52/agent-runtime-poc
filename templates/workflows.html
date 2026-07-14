@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Workflows{% endblock %}
+{% block content %}
+<style>
+.toast { position:fixed; top:1rem; right:1rem; z-index:9999; padding:0.75rem 1.5rem; border-radius:0.5rem; color:#fff; font-size:0.875rem; transition:opacity 0.3s; }
+.toast-success { background:#059669; }
+.toast-error { background:#dc2626; }
+</style>
+
+<div class="flex justify-between items-center mb-6">
+  <h1 class="text-2xl font-bold text-gray-800">Workflow Definitions</h1>
+  <button onclick="window.location.href='/workflows/new'"
+          class="bg-blue-600 text-white px-5 py-2 rounded text-sm hover:bg-blue-700 font-medium flex items-center gap-1.5">
+    + New Workflow
+  </button>
+</div>
+
+{% if workflows %}
+<div class="space-y-3">
+  {% for wf in workflows %}
+  <div class="bg-white rounded-lg shadow hover:shadow-md transition p-5">
+    <div class="flex items-center justify-between">
+      <div class="flex-1">
+        <div class="flex items-center gap-3 mb-1">
+          <a href="/workflows/{{ wf.workflow_id }}/{{ wf.version }}" class="text-lg font-bold text-blue-700 hover:underline">{{ wf.workflow_id }}</a>
+          <span class="text-gray-400 text-xs bg-gray-100 px-2 py-0.5 rounded">v{{ wf.version }}</span>
+          <span class="text-xs text-gray-400">{{ wf.created_at[:10] }}</span>
+        </div>
+        <p class="text-sm text-gray-600 mb-2">{{ wf.label }}</p>
+        <div class="flex items-center gap-4 text-xs text-gray-500">
+          <span class="flex items-center gap-1">&#9679; <span class="font-medium text-blue-700">{{ wf.state_count }}</span> states</span>
+          <span class="flex items-center gap-1">&#9679; <span class="font-medium text-purple-700">{{ wf.transition_count }}</span> transitions</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <a href="/workflows/{{ wf.workflow_id }}/{{ wf.version }}" class="text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded text-sm">View</a>
+        <a href="/workflows/{{ wf.workflow_id }}/{{ wf.version }}/edit" class="text-gray-600 hover:bg-gray-100 px-3 py-1.5 rounded text-sm">Edit</a>
+        <button onclick="deleteWorkflow('{{ wf.workflow_id }}', '{{ wf.version }}')"
+                class="text-red-500 hover:bg-red-50 px-3 py-1.5 rounded text-sm">Delete</button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="bg-white rounded-lg shadow p-12 text-center">
+  <p class="text-gray-400 text-lg mb-2">No workflows defined</p>
+  <p class="text-gray-300 text-sm">Click "New Workflow" to create one</p>
+</div>
+{% endif %}
+
+<script>
+function toast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 2500);
+}
+
+async function deleteWorkflow(id, ver) {
+  if (!confirm('Delete workflow "' + id + '" v' + ver + '?\n\nThis will permanently remove the workflow definition and all its instances.')) return;
+  try {
+    const resp = await fetch('/api/workflows/' + encodeURIComponent(id) + '/' + encodeURIComponent(ver), { method: 'DELETE' });
+    if (!resp.ok) {
+      const err = await resp.text();
+      toast('Delete failed: ' + err, 'error');
+      return;
+    }
+    toast('Deleted successfully!', 'success');
+    setTimeout(() => window.location.reload(), 600);
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,274 @@
+workflow_id: poc_doc_generation
+version: "1.0"
+description: "POC 설명 문서 자동 생성 — 웹 검색 + AI Agent로 POC 문서/발표자료 생성"
+
+input_schema:
+  project_name: string
+  description: string
+  key_features:
+    type: array
+    items: string
+
+states:
+  - id: START
+    type: start
+
+  - id: RESEARCH_DAPR
+    type: task
+    task: ai_task
+    timeout_sec: 120
+    description: "웹 검색으로 Dapr 기술 정보 수집"
+    instruction: >
+      You are a technical research analyst.
+
+      Search the web for information about Dapr (Distributed Application Runtime).
+      Focus on: workflow orchestration, when_all parallel execution, pub/sub, sidecar architecture.
+
+      Extract 5-7 key facts about Dapr capabilities relevant to an AI Agent orchestration platform.
+
+      Return JSON with: facts (array of {title, description}), summary (string).
+    inputs: []
+    tools: [web_search, web_fetch]
+    output_schema:
+      type: object
+      properties:
+        facts:
+          type: array
+          items:
+            type: object
+            properties:
+              title: {type: string}
+              description: {type: string}
+        summary: {type: string}
+
+  - id: ANALYZE_ARCHITECTURE
+    type: task
+    task: ai_task
+    timeout_sec: 120
+    description: "검색 결과를 기반으로 아키텍처 분석"
+    instruction: >
+      You are a solution architect.
+
+      Based on the research data and project description provided as input,
+      analyze how these components work together:
+      1. Orchestrator (BizFlowEngine) - flow control + state transitions
+      2. Dapr Workflow - durable execution + when_all parallel
+      3. Pub/Sub - async communication
+      4. Universal AI Worker - instruction-based task execution
+      5. PostgreSQL - workflow definitions + instance persistence
+
+      Explain the data flow and key architecture decisions.
+
+      Return JSON with: components (array), data_flow (string), design_rationale (string).
+    inputs: [RESEARCH_DAPR]
+    tools: []
+    output_schema:
+      type: object
+      properties:
+        components:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              role: {type: string}
+              description: {type: string}
+        data_flow: {type: string}
+        design_rationale: {type: string}
+
+  - id: CONTENT_CREATION
+    type: parallel
+    description: "문서 개요 + 발표자료 구조를 병렬로 생성"
+    branches:
+      - id: WRITE_OVERVIEW
+        task: ai_task
+        timeout_sec: 180
+        instruction: >
+          You are a technical writer.
+
+          Write an "Executive Summary and Architecture Overview" section.
+
+          Cover:
+          - Project goals and motivation
+          - High-level architecture with component interactions
+          - Key technical decisions (Dapr when_all, instruction-based worker, DB persistence)
+          - Benefits of this approach
+
+          Professional tone, about 1-2 pages of content.
+
+          Return JSON with: title (string), content (string), key_highlights (array of strings).
+        inputs: [RESEARCH_DAPR, ANALYZE_ARCHITECTURE]
+        tools: []
+        output_schema:
+          type: object
+          properties:
+            title: {type: string}
+            content: {type: string}
+            key_highlights:
+              type: array
+              items: {type: string}
+
+      - id: DESIGN_SLIDES
+        task: ai_task
+        timeout_sec: 180
+        instruction: >
+          You are a presentation designer.
+
+          Design a 10-slide presentation outline for this POC.
+
+          Each slide must include: slide title, 3-5 bullet points, visual suggestion, speaker notes.
+
+          Slides:
+          1. Title slide
+          2. Problem statement
+          3. Solution architecture overview
+          4. Dapr workflow detail
+          5. Parallel execution with when_all
+          6. Universal AI Worker design
+          7. Data flow diagram
+          8. Testing and verification
+          9. Key takeaways
+          10. Q and A
+
+          Return JSON with: slides (array).
+        inputs: [ANALYZE_ARCHITECTURE]
+        tools: []
+        output_schema:
+          type: object
+          properties:
+            slides:
+              type: array
+              items:
+                type: object
+                properties:
+                  slide_number: {type: integer}
+                  title: {type: string}
+                  bullets:
+                    type: array
+                    items: {type: string}
+                  visual_suggestion: {type: string}
+                  speaker_notes: {type: string}
+
+  - id: GENERATE_DOCUMENT
+    type: task
+    task: ai_task
+    timeout_sec: 180
+    description: "취합된 내용으로 최종 POC 문서 생성"
+    instruction: >
+      You are a documentation specialist.
+
+      Combine the overview content and slide deck design into a complete POC documentation package.
+
+      Structure:
+      1. Executive Summary
+      2. Architecture Deep Dive
+      3. Component Specifications
+      4. Slide Deck Outline
+      5. Appendix: Technical References
+
+      Make it professional and ready for stakeholder presentation.
+
+      Return JSON with: document (object with title, sections array, total_slides integer).
+    inputs: [WRITE_OVERVIEW, DESIGN_SLIDES]
+    tools: []
+    output_schema:
+      type: object
+      properties:
+        document:
+          type: object
+          properties:
+            title: {type: string}
+            sections:
+              type: array
+              items:
+                type: object
+                properties:
+                  heading: {type: string}
+                  content: {type: string}
+            total_slides: {type: integer}
+
+  - id: QUALITY_CHECK
+    type: task
+    task: ai_task
+    timeout_sec: 60
+    description: "생성된 문서 품질 검토"
+    instruction: >
+      You are a QA reviewer.
+
+      Review the generated POC documentation for:
+      - Completeness (all expected sections present?)
+      - Technical accuracy (Dapr concepts correct?)
+      - Clarity (understandable to stakeholders?)
+      - Professional tone
+
+      Score each category 1-10 and provide specific improvement suggestions.
+      If overall score >= 7, recommend approval.
+
+      Return JSON with: scores (object), overall_score (number), issues (array),
+      suggestions (array), verdict ("approved" or "needs_revision").
+    inputs: [GENERATE_DOCUMENT]
+    tools: []
+    output_schema:
+      type: object
+      properties:
+        scores:
+          type: object
+          properties:
+            completeness: {type: integer}
+            accuracy: {type: integer}
+            clarity: {type: integer}
+            professionalism: {type: integer}
+        overall_score: {type: number}
+        issues:
+          type: array
+          items: {type: string}
+        suggestions:
+          type: array
+          items: {type: string}
+        verdict: {type: string, enum: ["approved", "needs_revision"]}
+
+  - id: MANUAL_REVIEW
+    type: task
+    task: route_to_human
+    timeout_sec: 10
+    description: "오류 발생 시 수동 검토"
+
+  - id: END
+    type: end
+
+transitions:
+  - from: START
+    to: RESEARCH_DAPR
+
+  - from: RESEARCH_DAPR
+    to: ANALYZE_ARCHITECTURE
+    when: "result.status == 'OK'"
+  - from: RESEARCH_DAPR
+    to: MANUAL_REVIEW
+
+  - from: ANALYZE_ARCHITECTURE
+    to: CONTENT_CREATION
+    when: "result.status == 'OK'"
+  - from: ANALYZE_ARCHITECTURE
+    to: MANUAL_REVIEW
+
+  - from: CONTENT_CREATION
+    to: GENERATE_DOCUMENT
+    when: "result.WRITE_OVERVIEW.status == 'OK' and result.DESIGN_SLIDES.status == 'OK'"
+  - from: CONTENT_CREATION
+    to: MANUAL_REVIEW
+
+  - from: GENERATE_DOCUMENT
+    to: QUALITY_CHECK
+    when: "result.status == 'OK'"
+  - from: GENERATE_DOCUMENT
+    to: MANUAL_REVIEW
+
+  - from: QUALITY_CHECK
+    to: END
+    when: "result.status == 'OK' and result.verdict == 'approved'"
+  - from: QUALITY_CHECK
+    to: MANUAL_REVIEW
+
+  - from: MANUAL_REVIEW
+    to: END

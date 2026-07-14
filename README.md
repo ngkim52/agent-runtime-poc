@@ -132,6 +132,45 @@ docker compose exec orchestrator python scripts/migrate_yaml_to_db.py
 2. `scripts/migrate_yaml_to_db.py` 의 `ALL_WORKFLOWS` 리스트에 추가
 3. 마이그레이션 실행
 
+## Roadmap
+
+### Planned Features
+
+#### API Call Step
+워크플로우 스텝(State)에서 **외부 REST API 호출**을 `task_type` 으로 지원할 예정입니다.
+
+- REST API (GET/POST/PUT/DELETE) 호출
+- 요청/응답 변수 매핑 (Jinja2 템플릿)
+- 타임아웃 및 재시도 정책 설정
+- 인증 정보 secrets 관리
+
+#### Data Processing Step
+수집된 데이터를 가공/변환하는 **데이터 처리 스텝**을 지원할 예정입니다.
+
+- JSONata / JQ 기반 데이터 변환
+- 필터, 매핑, 집계 연산
+- 조건부 분기 로직
+- 이전 스텝 출력값 참조 및 가공
+
+#### Workflow Promotion (Dev → Production)
+개발계에 등록된 워크플로우와 스텝을 운영계로 이관(Promotion)하는 기능을 지원할 예정입니다.
+
+- **버전 비교** — 개발계/운영계 간 워크플로우 정의 diff 체크
+- **변경 내역 조회** — 특정 버전의 변경 스텝, 트랜지션, 스키마 차이 확인
+- **YAML 익스포트** — DB에 저장된 워크플로우를 YAML 파일로 추출하여 소스 관리
+- **동기화** — 검증된 워크플로우를 대상 환경에 배포
+
+이를 통해 Git 기반의 IaC(Infrastructure as Code) 워크플로우를 구성할 수 있으며, `biz_workflows/` 디렉토리의 YAML 파일과 DB 데이터 간의 양방향 동기화가 가능해집니다.
+
+#### Why These Features
+현재는 AI 에이전트(LangGraph) 기반 태스크만 지원합니다. 위 기능들이 추가되면:
+
+1. **외부 시스템 연동** — 레거시 API, DB, SaaS 서비스와 직접 통합
+2. **데이터 ETL** — 수집 → 정제 → 가공 → 저장 파이프라인 구성
+3. **하이브리드 워크플로우** — AI 판단 + API 호출 + 데이터 변환 조합
+4. **No-Code 에이전트** — YAML 선언만으로 복잡한 비즈니스 로직 구현
+5. **Git 기반 운영** — DB ↔ YAML 동기화로 버전 관리 및 환경 간 프로모션
+
 ## Project Structure
 
 ```

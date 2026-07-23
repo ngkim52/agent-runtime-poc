@@ -68,14 +68,16 @@ class DirectAgentClient:
         self,
         branches: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """병렬 브랜치를 순차적으로 실행 (Dapr when_all 대체)."""
+        """병렬 브랜치를 ThreadPoolExecutor로 동시 실행 (Dapr when_all 대체)."""
+        import concurrent.futures
         log.info("→ DirectAgent parallel: %d branches", len(branches))
-        branch_results = {}
+        branch_results: Dict[str, Any] = {}
         all_ok = True
-        for b in branches:
+
+        def _run_branch(b: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
             bid = b["id"]
+            branch_timeout = float(b.get("timeout_sec", 300))
             try:
-                branch_timeout = float(b.get("timeout_sec", 300))
                 result = self.execute_task(
                     task_type=b["task_type"],
                     payload=b["payload"],
@@ -85,12 +87,18 @@ class DirectAgentClient:
                     timeout=branch_timeout,
                     max_tokens=b.get("max_tokens"),
                 )
-                branch_results[bid] = result["output"]
-                if result["output"]["status"] != "OK":
-                    all_ok = False
+                return bid, result["output"]
             except Exception as e:
-                branch_results[bid] = {"status": "FAIL", "error": str(e)}
-                all_ok = False
+                return bid, {"status": "FAIL", "error": str(e)}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(branches)) as pool:
+            futures = {pool.submit(_run_branch, b): b["id"] for b in branches}
+            for future in concurrent.futures.as_completed(futures):
+                bid, output = future.result()
+                branch_results[bid] = output
+                if output["status"] != "OK":
+                    all_ok = False
+
         return {
             "output": {
                 "branches": branch_results,

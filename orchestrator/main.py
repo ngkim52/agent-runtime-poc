@@ -1,9 +1,9 @@
-# orchestrator/main.py
 from __future__ import annotations
 import json
 import os
 import sys
 import logging
+from contextlib import asynccontextmanager
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -29,7 +29,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("orchestrator")
 
-app = FastAPI(title="Biz Orchestrator (Claim Adjudication)")
+# ── Lifespan (startup/shutdown) ───────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    log.info("DB tables synced (%d tables)", len(Base.metadata.tables))
+    yield
+
+app = FastAPI(title="Biz Orchestrator (Claim Adjudication)", lifespan=lifespan)
 _jinja_env = Environment(
     loader=FileSystemLoader(os.path.join(PROJECT_ROOT, "templates")),
 )
@@ -39,12 +46,6 @@ def _tojson_unicode(value: Any, indent: int = 2) -> str:
     return json.dumps(value, indent=indent, ensure_ascii=False)
 
 _jinja_env.filters["tojson_unicode"] = _tojson_unicode
-
-# ── DB 테이블 자동 생성 ──────────────────────────────────────
-@app.on_event("startup")
-def _init_db():
-    Base.metadata.create_all(bind=engine)
-    log.info("DB tables synced (%d tables)", len(Base.metadata.tables))
 
 # ── 싱글톤 ──────────────────────────────────────────────────
 _db_repo = BizWorkflowRepository()
@@ -582,19 +583,20 @@ def instance_progress_page(instance_id: str):
 
 def _extract_md_from_result(result: Dict[str, Any]) -> str:
     """result에서 markdown content를 다양한 포맷으로부터 추출."""
-    # 1) 직접 markdown 키
-    md = result.get("markdown", "")
-    if md:
-        return md
+    # 1) 직접 markdown 키 (poc_doc_generation)
+    for key in ("markdown", "GENERATE_MD"):
+        md = result.get(key, "")
+        if md:
+            return md
 
-    # 2) llm_output fallback: JSON string 안에 markdown/document/content 키
+    # 2) llm_output fallback: JSON string 안에 markdown/document/content/GENERATE_MD 키
     llm = result.get("llm_output", "")
     if isinstance(llm, str) and llm.strip():
         text = llm.strip()
         if text.startswith("{"):
             try:
                 parsed = json.loads(text)
-                for key in ("markdown", "document", "content"):
+                for key in ("markdown", "document", "content", "GENERATE_MD"):
                     val = parsed.get(key, "")
                     if val and isinstance(val, str):
                         return val
@@ -603,7 +605,7 @@ def _extract_md_from_result(result: Dict[str, Any]) -> str:
                 # {"title":"...","markdown":"# 내용..." 형태에서 markdown 값 추출
                 import re
                 # "markdown": 다음의 값 추출 (Truncated JSON이어도)
-                m = re.search(r'"(?:markdown|document|content)"\s*:\s*"(.+)', text, re.DOTALL)
+                m = re.search(r'"(?:markdown|document|content|GENERATE_MD)"\s*:\s*"(.+)', text, re.DOTALL)
                 if m:
                     raw = m.group(1)
                     # Remove trailing unclosed string artifacts
@@ -621,9 +623,14 @@ def _extract_md_from_result(result: Dict[str, Any]) -> str:
 
 def _extract_title_from_result(result: Dict[str, Any], default: str = "POC Documentation") -> str:
     """result에서 title 추출 (다양한 포맷)."""
-    title = result.get("title", "")
-    if title:
-        return title
+    for key in ("title", "GENERATE_MD"):
+        val = result.get(key, "")
+        if val and isinstance(val, str):
+            # If we got GENERATE_MD value, derive title from first line
+            if key == "GENERATE_MD":
+                first_line = val.strip().split("\n")[0]
+                return first_line.lstrip("#").strip() or default
+            return val
     llm = result.get("llm_output", "")
     if isinstance(llm, str) and llm.strip().startswith("{"):
         try:
@@ -639,11 +646,12 @@ def instance_output_page(instance_id: str):
     detail = _db_repo.get_instance_detail(instance_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Instance not found")
-    # Find markdown output from the last GENERATE_MD step
+    # Find markdown output from the report-generating step
     md_content = ""
     title = "POC Documentation"
+    md_state_ids = ("GENERATE_REPORT", "GENERATE_MD")
     for step in reversed(detail.get("steps", [])):
-        if step.get("state_id") == "GENERATE_MD" and step.get("status") == "OK":
+        if step.get("state_id") in md_state_ids and step.get("status") == "OK":
             result = step.get("result", {})
             md_content = _extract_md_from_result(result)
             title = _extract_title_from_result(result, title)
@@ -663,6 +671,211 @@ def instance_detail_page(instance_id: str):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Mock API Endpoints (for testing claim_basic_adjudication)
+# ═══════════════════════════════════════════════════════════════
+
+_MOCK_POLICIES = {
+    "POL-HEALTH-8842": {
+        "customer_id": "CUST-001",
+        "product_code": "HEALTH-GOLD",
+        "coverage_type": "실손의료비",
+        "max_benefit": 50000000,
+        "deductible": 500000,
+        "premium_status": "정상납입",
+        "status": "active",
+    },
+    "POL-AUTO-1234": {
+        "customer_id": "CUST-002",
+        "product_code": "AUTO-STANDARD",
+        "coverage_type": "자동차종합",
+        "max_benefit": 100000000,
+        "deductible": 200000,
+        "premium_status": "정상납입",
+        "status": "active",
+    },
+    "POL-LIFE-5678": {
+        "customer_id": "CUST-003",
+        "product_code": "LIFE-VIP",
+        "coverage_type": "종신보험",
+        "max_benefit": 200000000,
+        "deductible": 0,
+        "premium_status": "연체",
+        "status": "lapse",
+    },
+}
+
+_MOCK_CUSTOMERS = {
+    "CUST-001": {
+        "name": "홍길동",
+        "birth_date": "1985-03-15",
+        "phone": "010-1234-5678",
+        "email": "hong@example.com",
+        "refund_account": "국민은행 123-45-67890",
+        "claim_history": ["CLM-2023-001", "CLM-2024-012"],
+        "claim_count_3y": 2,
+    },
+    "CUST-002": {
+        "name": "김영희",
+        "birth_date": "1990-07-22",
+        "phone": "010-9876-5432",
+        "email": "kim@example.com",
+        "refund_account": "신한은행 987-65-43210",
+        "claim_history": [],
+        "claim_count_3y": 0,
+    },
+    "CUST-003": {
+        "name": "이철수",
+        "birth_date": "1975-11-02",
+        "phone": "010-5555-6666",
+        "email": "lee@example.com",
+        "refund_account": "우리은행 555-66-77777",
+        "claim_history": ["CLM-2022-005", "CLM-2023-008", "CLM-2023-015", "CLM-2024-001", "CLM-2024-007"],
+        "claim_count_3y": 5,
+    },
+}
+
+_MOCK_CLAIM_RESULTS = {}
+
+
+@app.get("/api/mock/policies/{policy_no}")
+def mock_get_policy(policy_no: str):
+    data = _MOCK_POLICIES.get(policy_no)
+    if not data:
+        return JSONResponse(status_code=404, content={"error": "Policy not found", "code": 404})
+    return {"status": "ok", "data": data}
+
+
+@app.get("/api/mock/customers/{customer_id}")
+def mock_get_customer(customer_id: str):
+    data = _MOCK_CUSTOMERS.get(customer_id)
+    if not data:
+        return JSONResponse(status_code=404, content={"error": "Customer not found", "code": 404})
+    return {"status": "ok", "data": data}
+
+
+@app.post("/api/mock/fraud/evaluate")
+def mock_fraud_evaluate(body: dict = Body(...)):
+    amount = int(float(body.get("amount", 0)))
+    risk_score = int(body.get("risk_score", 0))
+    claim_count = 2  # simplified
+
+    score = min(100, amount // 200000 + risk_score // 2 + claim_count * 5)
+    indicators = []
+    if amount > 10000000:
+        indicators.append("고액청구")
+    if risk_score > 70:
+        indicators.append("고위험군")
+    if claim_count > 3:
+        indicators.append("다건청구이력")
+
+    action = "approve" if score < 40 else "review" if score < 70 else "block"
+
+    return {
+        "status": "ok",
+        "data": {
+            "score": score,
+            "indicators": indicators if indicators else ["정상"],
+            "action": action,
+        },
+    }
+
+
+@app.post("/api/mock/claims/{claim_id}/result")
+def mock_submit_claim_result(claim_id: str, body: dict = Body(...)):
+    _MOCK_CLAIM_RESULTS[claim_id] = body
+    return {
+        "status": "ok",
+        "data": {
+            "reference_number": f"REF-{claim_id}-{len(_MOCK_CLAIM_RESULTS)}",
+            "processed_at": datetime.now().isoformat(),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# Test: 워크플로우 등록 + 실행 (단일 엔드포인트)
+# ═══════════════════════════════════════════════════════════════
+
+class TestRunRequest(BaseModel):
+    workflow_id: str
+    version: str = "1.0"
+    input: Dict[str, Any]
+
+
+@app.post("/api/test/run")
+def api_test_run(req: TestRunRequest) -> Dict[str, Any]:
+    """
+    1. YAML 파일을 찾아 DB에 등록 (이미 있으면 업데이트)
+    2. 워크플로우 실행
+    3. 결과 반환 (동기)
+    """
+    import threading
+    from orchestrator.instance import ClaimInstance
+    from shared.workflow_loader import BizWorkflowLoader
+
+    # 1) YAML → DB 등록
+    loader = BizWorkflowLoader()
+    base_dir = os.path.join(PROJECT_ROOT, "biz_workflows")
+    pattern = os.path.join(base_dir, f"{req.workflow_id}_v{req.version}.yaml")
+    if os.path.exists(pattern):
+        wf = loader.load(pattern)
+        _db_repo.save_workflow(wf)
+        log.info("Test: registered workflow %s v%s from YAML", req.workflow_id, req.version)
+    else:
+        wf = _get_wf(req.workflow_id, req.version)
+
+    # 2) Instance 생성
+    inst = ClaimInstance(
+        workflow_id=req.workflow_id,
+        workflow_version=req.version,
+        initial_input=req.input,
+    )
+    wf_def_id = _db_repo._lookup_wf_def_id(req.workflow_id, req.version)
+    _db_repo.save_instance(
+        instance_id=inst.instance_id,
+        wf_def_id=wf_def_id,
+        workflow_id=req.workflow_id,
+        workflow_version=req.version,
+        initial_input=req.input,
+    )
+    _db_repo.update_instance_state(inst.instance_id, current_state="START", status="RUNNING")
+
+    # 3) Engine 실행 (동기)
+    try:
+        _engine.run(
+            workflow_id=req.workflow_id,
+            version=req.version,
+            initial_input=req.input,
+            existing_instance=inst,
+        )
+        status = "completed"
+    except Exception as e:
+        log.exception("Test run failed for %s", inst.instance_id)
+        _db_repo.update_instance_state(inst.instance_id, current_state="ERROR", status="FAILED")
+        return {"instance_id": inst.instance_id, "status": "FAILED", "error": str(e)}
+
+    # 4) 결과 조회
+    detail = _db_repo.get_instance_detail(inst.instance_id)
+    return {
+        "instance_id": inst.instance_id,
+        "status": status,
+        "workflow_id": req.workflow_id,
+        "version": req.version,
+        "steps": [
+            {
+                "state_id": s.state_id,
+                "task_type": s.task_type,
+                "status": s.status,
+                "result": s.result,
+                "error": s.error,
+            }
+            for s in (inst.history if hasattr(inst, "history") else [])
+        ],
+        "output": detail.get("output") if isinstance(detail, dict) else None,
+    }
 
 
 if __name__ == "__main__":

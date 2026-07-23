@@ -1,0 +1,407 @@
+workflow_id: claim_basic_adjudication
+version: "1.0"
+description: >
+  보험금 청구 접수 → API 증권조회 → API 고객조회 → AI 분류 →
+  API 사기탐지 → data_processing 정제 → AI 최종결정 →
+  API 결과전송 → MD 리포트 생성
+
+input_schema:
+  type: object
+  properties:
+    claim_id:
+      type: string
+    customer_id:
+      type: string
+    policy_number:
+      type: string
+    claim_amount:
+      type: number
+    claim_type:
+      type: string
+    diagnosis_code:
+      type: string
+    hospital_code:
+      type: string
+    incident_date:
+      type: string
+    submission_date:
+      type: string
+    submitted_docs:
+      type: array
+
+states:
+  - id: START
+    type: start
+
+  # ─────────────────────────────────────────────
+  # Step 1: 증권정보 + 고객정보 API 병렬 조회
+  # ─────────────────────────────────────────────
+  - id: FETCH_INITIAL_DATA
+    type: parallel
+    branches:
+      - id: GET_POLICY
+        task: rest_api_call
+        vars:
+          policy_no: "$._input.policy_number"
+        rest_api_config:
+          method: GET
+          url: "http://orchestrator:8000/api/mock/policies/{{ payload.policy_no }}"
+          headers:
+            X-Test-Mode: "true"
+          timeout_sec: 10
+          max_retries: 2
+          response_mapping:
+            customer_id: "$.data.customer_id"
+            product_code: "$.data.product_code"
+            coverage_type: "$.data.coverage_type"
+            max_benefit: "$.data.max_benefit"
+            deductible: "$.data.deductible"
+            premium_status: "$.data.premium_status"
+            policy_status: "$.data.status"
+          error_handling:
+            "404": "continue"
+            "500": "retry"
+            default: "fail"
+
+      - id: GET_CUSTOMER
+        task: rest_api_call
+        vars:
+          customer_id: "$._input.customer_id"
+        rest_api_config:
+          method: GET
+          url: "http://orchestrator:8000/api/mock/customers/{{ payload.customer_id }}"
+          headers:
+            X-Test-Mode: "true"
+          timeout_sec: 10
+          response_mapping:
+            name: "$.data.name"
+            birth: "$.data.birth_date"
+            phone: "$.data.phone"
+            email: "$.data.email"
+            account: "$.data.refund_account"
+            claim_history: "$.data.claim_history"
+            claim_count_3y: "$.data.claim_count_3y"
+          error_handling:
+            "404": "continue"
+            default: "fail"
+
+  # ─────────────────────────────────────────────
+  # Step 3: AI 청구 분류
+  # ─────────────────────────────────────────────
+  - id: CLASSIFY_CLAIM
+    type: task
+    task: ai_task
+    vars:
+      claim: "$._input"
+      coverage: "$.GET_POLICY"
+      customer: "$.GET_CUSTOMER"
+    instruction: >
+      You are a claims classifier. Analyze the claim data:
+
+      Claim: {{ payload.claim.claim_id }}, {{ payload.claim.claim_amount }}원
+      Policy: {{ payload.coverage.coverage_type }}, limit {{ payload.coverage.max_benefit }}원
+      Customer: {{ payload.customer.name }}, {{ payload.customer.claim_count_3y }} claims in 3yr
+
+      Output JSON ONLY:
+      {
+        "claim_category": "inpatient|outpatient|medication|surgery",
+        "risk_score": <0-100>,
+        "estimated_payout": <number>,
+        "priority": "urgent|normal",
+        "processing_tier": "express|standard|intensive",
+        "initial_verdict": "approve|review|reject",
+        "classification_reason": "<string>"
+      }
+    output_schema:
+      type: object
+      properties:
+        claim_category:
+          type: string
+        risk_score:
+          type: integer
+        estimated_payout:
+          type: number
+        priority:
+          type: string
+        processing_tier:
+          type: string
+        initial_verdict:
+          type: string
+        classification_reason:
+          type: string
+
+  # ─────────────────────────────────────────────
+  # Step 4: 사기탐지 API 호출
+  # ─────────────────────────────────────────────
+  - id: FRAUD_CHECK
+    type: task
+    task: rest_api_call
+    vars:
+      claim_id: "$._input.claim_id"
+      amount: "$._input.claim_amount"
+      customer_name: "$.GET_CUSTOMER.name"
+      risk: "$.CLASSIFY_CLAIM.risk_score"
+    rest_api_config:
+      method: POST
+      url: "http://orchestrator:8000/api/mock/fraud/evaluate"
+      headers:
+        Content-Type: "application/json"
+        X-Test-Mode: "true"
+      body:
+        claim_id: "{{ payload.claim_id }}"
+        amount: "{{ payload.amount }}"
+        claimant: "{{ payload.customer_name }}"
+        risk_score: "{{ payload.risk }}"
+      timeout_sec: 15
+      response_mapping:
+        fraud_score: "$.data.score"
+        fraud_indicators: "$.data.indicators"
+        recommended_action: "$.data.action"
+      error_handling:
+        default: "continue"
+
+  # ─────────────────────────────────────────────
+  # Step 5: 데이터 정제 (data_processing)
+  # ─────────────────────────────────────────────
+  - id: PROCESS_RESULTS
+    type: task
+    task: data_processing
+    vars:
+      classification: "$.CLASSIFY_CLAIM"
+      fraud: "$.FRAUD_CHECK"
+      policy: "$.GET_POLICY"
+    data_processing_config:
+      transforms:
+        - type: select
+          source_var: classification
+          fields:
+            category: "item.claim_category"
+            risk: "item.risk_score"
+            payout: "item.estimated_payout"
+            tier: "item.processing_tier"
+            verdict: "item.initial_verdict"
+          result_var: selected
+        - type: select
+          source_var: fraud
+          fields:
+            score: "item.fraud_score"
+            indicators: "item.fraud_indicators"
+            fraud_action: "item.recommended_action"
+          result_var: fraud_info
+        - type: select
+          source_var: policy
+          fields:
+            premium: "item.premium_status"
+            policy_stat: "item.policy_status"
+          result_var: policy_info
+        - type: merge
+          sources:
+            - selected
+            - fraud_info
+            - policy_info
+          result_var: merged
+      output_var: merged
+
+  # ─────────────────────────────────────────────
+  # Step 6: AI 최종 결정
+  # ─────────────────────────────────────────────
+  - id: FINAL_DECISION
+    type: task
+    task: ai_task
+    vars:
+      merged: "$.PROCESS_RESULTS.merged"
+      claim: "$._input"
+      policy: "$.GET_POLICY"
+      customer: "$.GET_CUSTOMER"
+    instruction: >
+      Final claim adjudication for {{ payload.claim.claim_id }}.
+
+      Claim amount: {{ payload.claim.claim_amount }}원
+      Deductible: {{ payload.policy.deductible }}원
+      Max benefit: {{ payload.policy.max_benefit }}원
+      Premium status: {{ payload.merged.premium }}
+      Policy status: {{ payload.merged.policy_stat }}
+      Customer: {{ payload.customer.name }}, {{ payload.customer.claim_count_3y }} claims
+      Risk score: {{ payload.merged.risk }}
+      Estimated payout: {{ payload.merged.payout }}원
+      Tier: {{ payload.merged.tier }}
+      Initial verdict: {{ payload.merged.verdict }}
+      Fraud score: {{ payload.merged.score }}
+      Fraud indicators: {{ payload.merged.indicators }}
+
+      Output JSON ONLY:
+      {
+        "approve": true/false,
+        "approve_amount": <number>,
+        "condition": "<string or null>",
+        "reject_reason": "<string or null>",
+        "reviewer": "AI_AUTO|MANUAL_REQUIRED",
+        "decision_summary": "<string>"
+      }
+    output_schema:
+      type: object
+      properties:
+        approve:
+          type: boolean
+        approve_amount:
+          type: number
+        condition:
+          type: string
+        reject_reason:
+          type: string
+        reviewer:
+          type: string
+        decision_summary:
+          type: string
+
+  # ─────────────────────────────────────────────
+  # Step 7: 결과 코어시스템 API 전송
+  # ─────────────────────────────────────────────
+  - id: SUBMIT_RESULT
+    type: task
+    task: rest_api_call
+    vars:
+      decision: "$.FINAL_DECISION"
+      claim_id: "$._input.claim_id"
+    rest_api_config:
+      method: POST
+      url: "http://orchestrator:8000/api/mock/claims/{{ payload.claim_id }}/result"
+      headers:
+        Content-Type: "application/json"
+        X-Test-Mode: "true"
+      body:
+        claim_id: "{{ payload.claim_id }}"
+        decision: "{{ payload.decision.approve }}"
+        amount: "{{ payload.decision.approve_amount }}"
+        condition: "{{ payload.decision.condition }}"
+        reject_reason: "{{ payload.decision.reject_reason }}"
+        reviewer: "{{ payload.decision.reviewer }}"
+      timeout_sec: 15
+      max_retries: 3
+      response_mapping:
+        core_reference: "$.data.reference_number"
+        processed_at: "$.data.processed_at"
+      error_handling:
+        "409": "continue"
+        default: "fail"
+
+  # ─────────────────────────────────────────────
+  # Step 8: MD 리포트 생성
+  # ─────────────────────────────────────────────
+  - id: GENERATE_REPORT
+    type: task
+    task: ai_task
+    vars:
+      input: "$._input"
+      policy: "$.GET_POLICY"
+      customer: "$.GET_CUSTOMER"
+      classification: "$.CLASSIFY_CLAIM"
+      fraud: "$.FRAUD_CHECK"
+      processed: "$.PROCESS_RESULTS.merged"
+      decision: "$.FINAL_DECISION"
+      submission: "$.SUBMIT_RESULT"
+    instruction: >
+      Generate a comprehensive Korean markdown report (.md) for the claim adjudication.
+      Use the following structure:
+
+      # 보험금 청구 심사 결과 보고서
+
+      ## 1. 청구 개요
+      | 항목 | 내용 |
+      |------|------|
+      | 청구번호 | {{ payload.input.claim_id }} |
+      | 청구금액 | {{ payload.input.claim_amount }}원 |
+      | 청구유형 | {{ payload.input.claim_type }} |
+      | 사고일자 | {{ payload.input.incident_date }} |
+
+      ## 2. 증권 정보
+      | 항목 | 내용 |
+      |------|------|
+      | 증권번호 | {{ payload.input.policy_number }} |
+      | 보장유형 | {{ payload.policy.coverage_type }} |
+      | 보장한도 | {{ payload.policy.max_benefit }}원 |
+      | 자기부담금 | {{ payload.policy.deductible }}원 |
+      | 보험료상태 | {{ payload.policy.premium_status }} |
+      | 증권상태 | {{ payload.policy.policy_status }} |
+
+      ## 3. 고객 정보
+      | 항목 | 내용 |
+      |------|------|
+      | 성명 | {{ payload.customer.name }} |
+      | 연락처 | {{ payload.customer.phone }} |
+      | 3년간 청구건수 | {{ payload.customer.claim_count_3y }}건 |
+
+      ## 4. AI 분류 결과
+      | 항목 | 내용 |
+      |------|------|
+      | 청구카테고리 | {{ payload.classification.claim_category }} |
+      | 위험도 | {{ payload.classification.risk_score }}점 |
+      | 예상지급액 | {{ payload.classification.estimated_payout }}원 |
+      | 처리등급 | {{ payload.classification.processing_tier }} |
+      | 1차판정 | {{ payload.classification.initial_verdict }} |
+      | 분류사유 | {{ payload.classification.classification_reason }} |
+
+      ## 5. 사기탐지 결과
+      | 항목 | 내용 |
+      |------|------|
+      | 사기지수 | {{ payload.fraud.fraud_score }} |
+      | 탐지항목 | {{ payload.fraud.fraud_indicators }} |
+      | 권장조치 | {{ payload.fraud.recommended_action }} |
+
+      ## 6. 최종 심사 결정
+      | 항목 | 내용 |
+      |------|------|
+      | 승인여부 | {{ payload.decision.approve }} |
+      | 승인금액 | {{ payload.decision.approve_amount }}원 |
+      | 조건 | {{ payload.decision.condition }} |
+      | 거절사유 | {{ payload.decision.reject_reason }} |
+      | 결정요약 | {{ payload.decision.decision_summary }} |
+
+      ## 7. 시스템 처리 결과
+      | 항목 | 내용 |
+      |------|------|
+      | 코어참조번호 | {{ payload.submission.core_reference }} |
+      | 처리일시 | {{ payload.submission.processed_at }} |
+
+      ## 8. 처리 파이프라인
+
+      ```mermaid
+      graph LR
+        A[청구접수] --> B[증권조회 API]
+        A --> C[고객조회 API]
+        B --> D[AI 분류]
+        C --> D
+        D --> E[사기탐지 API]
+        E --> F[데이터정제]
+        F --> G[AI 최종결정]
+        G --> H[코어API 전송]
+        H --> I[리포트 생성]
+      ```
+
+      Return ONLY the rendered markdown with actual values filled in.
+    output_schema:
+      type: object
+      properties:
+        GENERATE_MD:
+          type: string
+
+  - id: END
+    type: end
+
+transitions:
+  - from: START
+    to: FETCH_INITIAL_DATA
+  - from: FETCH_INITIAL_DATA
+    to: CLASSIFY_CLAIM
+  - from: CLASSIFY_CLAIM
+    to: FRAUD_CHECK
+  - from: FRAUD_CHECK
+    to: PROCESS_RESULTS
+  - from: PROCESS_RESULTS
+    to: FINAL_DECISION
+  - from: FINAL_DECISION
+    to: SUBMIT_RESULT
+  - from: SUBMIT_RESULT
+    to: GENERATE_REPORT
+  - from: GENERATE_REPORT
+    to: END
